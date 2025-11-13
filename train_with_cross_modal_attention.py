@@ -126,6 +126,14 @@ def get_parser():
     parser.add_argument('--middle_fusion_dropout', type=float, default=0.1,
                         help='中期融合dropout率')
 
+    # 对比学习参数
+    parser.add_argument('--use_contrastive', type=bool, default=False,
+                        help='是否使用对比学习损失')
+    parser.add_argument('--contrastive_weight', type=float, default=0.1,
+                        help='对比学习损失的权重（相对于主任务损失）')
+    parser.add_argument('--contrastive_temperature', type=float, default=0.1,
+                        help='对比学习的温度参数')
+
     # 其他参数
     parser.add_argument('--output_dir', type=str, default='./output/',
                         help='输出目录')
@@ -342,6 +350,10 @@ def create_config(args):
         middle_fusion_hidden_dim=args.middle_fusion_hidden_dim,
         middle_fusion_num_heads=args.middle_fusion_num_heads,
         middle_fusion_dropout=args.middle_fusion_dropout,
+        # 对比学习配置
+        use_contrastive_loss=args.use_contrastive,
+        contrastive_loss_weight=args.contrastive_weight,
+        contrastive_temperature=args.contrastive_temperature,
         link="identity",
         zero_inflated=False,
         classification=False
@@ -445,6 +457,12 @@ def main():
         print(f"  隐藏维度: {args.middle_fusion_hidden_dim}")
         print(f"  注意力头数: {args.middle_fusion_num_heads}")
         print(f"  Dropout率: {args.middle_fusion_dropout}")
+
+    print(f"\n对比学习配置:")
+    print(f"  启用: {args.use_contrastive}")
+    if args.use_contrastive:
+        print(f"  损失权重: {args.contrastive_weight}")
+        print(f"  温度参数: {args.contrastive_temperature}")
 
     print(f"\n输出目录: {args.output_dir}")
     print("="*80 + "\n")

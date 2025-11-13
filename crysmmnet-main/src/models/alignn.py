@@ -66,6 +66,58 @@ class ProjectionHead(nn.Module):
         x = self.layer_norm(x)
         return x
 
+class ContrastiveLoss(nn.Module):
+    """Contrastive loss for aligning graph and text representations.
+
+    Implements InfoNCE loss to encourage corresponding graph-text pairs
+    to have similar representations while pushing non-corresponding pairs apart.
+    """
+
+    def __init__(self, temperature=0.1):
+        """Initialize contrastive loss.
+
+        Args:
+            temperature: Temperature parameter for scaling similarities.
+                        Lower values make the distribution more peaked.
+        """
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, graph_features, text_features):
+        """Compute bidirectional contrastive loss.
+
+        Args:
+            graph_features: Graph representations [batch_size, feature_dim]
+            text_features: Text representations [batch_size, feature_dim]
+
+        Returns:
+            loss: Contrastive loss value
+        """
+        batch_size = graph_features.size(0)
+
+        # L2 normalize features for cosine similarity
+        graph_features = F.normalize(graph_features, dim=1)
+        text_features = F.normalize(text_features, dim=1)
+
+        # Compute similarity matrix [batch_size, batch_size]
+        # similarity[i,j] = cosine similarity between graph_i and text_j
+        similarity_matrix = torch.matmul(graph_features, text_features.T) / self.temperature
+
+        # Labels: diagonal elements are positive pairs
+        labels = torch.arange(batch_size, device=graph_features.device)
+
+        # Graph-to-Text loss: for each graph, find its corresponding text
+        loss_g2t = F.cross_entropy(similarity_matrix, labels)
+
+        # Text-to-Graph loss: for each text, find its corresponding graph
+        loss_t2g = F.cross_entropy(similarity_matrix.T, labels)
+
+        # Average bidirectional loss
+        loss = (loss_g2t + loss_t2g) / 2.0
+
+        return loss
+
+
 class MiddleFusionModule(nn.Module):
     """Middle fusion module for injecting text information into graph encoding.
 
@@ -303,6 +355,11 @@ class ALIGNNConfig(BaseSettings):
     middle_fusion_num_heads: int = 2
     middle_fusion_dropout: float = 0.1
 
+    # Contrastive learning settings
+    use_contrastive_loss: bool = False
+    contrastive_loss_weight: float = 0.1
+    contrastive_temperature: float = 0.1
+
     # if link == log, apply `exp` to final outputs
     # to constrain predictions to be positive
     link: Literal["identity", "log", "logit"] = "identity"
@@ -525,6 +582,12 @@ class ALIGNN(nn.Module):
             self.fc1 = nn.Linear(128, 64)
             self.fc = nn.Linear(64, config.output_features)
 
+        # Contrastive learning module
+        self.use_contrastive_loss = config.use_contrastive_loss
+        if self.use_contrastive_loss:
+            self.contrastive_loss_fn = ContrastiveLoss(temperature=config.contrastive_temperature)
+            self.contrastive_loss_weight = config.contrastive_loss_weight
+
         self.link = None
         self.link_name = config.link
         if config.link == "identity":
@@ -538,8 +601,16 @@ class ALIGNN(nn.Module):
         elif config.link == "logit":
             self.link = torch.sigmoid
 
-    def forward(self, g: Union[Tuple[dgl.DGLGraph, dgl.DGLGraph], dgl.DGLGraph]):
+    def forward(self, g: Union[Tuple[dgl.DGLGraph, dgl.DGLGraph], dgl.DGLGraph], return_features=False):
         """ALIGNN : start with `atom_features`.
+
+        Args:
+            g: Graph(s) and text input
+            return_features: If True, return dict with predictions and intermediate features
+
+        Returns:
+            If return_features=False: predictions [batch_size]
+            If return_features=True: dict with 'predictions', 'graph_features', 'text_features', 'contrastive_loss'
 
         x: atom features (g.ndata)
         y: bond features (g.edata and lg.ndata)
@@ -616,4 +687,24 @@ class ALIGNN(nn.Module):
         if self.classification:
             # out = torch.round(torch.sigmoid(out))
             out = self.softmax(out)
-        return torch.squeeze(out)
+
+        predictions = torch.squeeze(out)
+
+        # Return intermediate features if requested (for contrastive learning)
+        if return_features or self.use_contrastive_loss:
+            output_dict = {
+                'predictions': predictions,
+                'graph_features': h if not self.use_cross_modal_attention else enhanced_graph,
+                'text_features': text_emb if not self.use_cross_modal_attention else enhanced_text,
+            }
+
+            # Compute contrastive loss if enabled
+            if self.use_contrastive_loss and self.training:
+                graph_feat = h if not self.use_cross_modal_attention else enhanced_graph
+                text_feat = text_emb if not self.use_cross_modal_attention else enhanced_text
+                contrastive_loss = self.contrastive_loss_fn(graph_feat, text_feat)
+                output_dict['contrastive_loss'] = contrastive_loss
+
+            return output_dict if return_features or (self.use_contrastive_loss and self.training) else predictions
+
+        return predictions
