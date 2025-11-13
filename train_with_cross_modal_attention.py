@@ -296,6 +296,17 @@ def create_config(args):
     # 导入 ALIGNNConfig
     from models.alignn import ALIGNNConfig
 
+    # 数据集名称映射：用户友好名称 -> TrainingConfig 期望的名称
+    dataset_mapping = {
+        'jarvis': 'user_data',
+        'mp': 'user_data',
+        'toy': 'user_data',
+        'user_data': 'user_data',
+    }
+
+    # 获取实际的数据集名称
+    actual_dataset = dataset_mapping.get(args.dataset.lower(), 'user_data')
+
     # 创建模型配置对象
     model_config = ALIGNNConfig(
         name="alignn",
@@ -319,7 +330,7 @@ def create_config(args):
 
     config = {
         "version": "cross_modal_attention_v1",
-        "dataset": args.dataset,
+        "dataset": actual_dataset,  # 使用映射后的名称
         "target": "target",
         "atom_features": "cgcnn",
         "neighbor_strategy": "k-nearest",
