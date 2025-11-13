@@ -60,8 +60,8 @@ def get_parser():
     )
 
     # 数据集参数
-    parser.add_argument('--root_dir', type=str, default='./crysmmnet-main/dataset/',
-                        help='数据集根目录')
+    parser.add_argument('--root_dir', type=str, default='../dataset/',
+                        help='数据集根目录（相对于当前目录或绝对路径）')
     parser.add_argument('--dataset', type=str, default='jarvis',
                         choices=['jarvis', 'mp', 'toy'],
                         help='数据集名称: jarvis, mp, toy')
@@ -195,9 +195,32 @@ def load_dataset(cif_dir, id_prop_file, dataset, property_name):
     norm = BertNormalizer(lowercase=False, strip_accents=True,
                          clean_text=True, handle_chinese_chars=True)
 
-    # 加载词汇映射
-    vocab_file = os.path.join(os.path.dirname(__file__),
-                              'crysmmnet-main/src/vocab_mappings.txt')
+    # 加载词汇映射 - 智能路径查找
+    # 尝试多个可能的路径
+    possible_paths = [
+        'vocab_mappings.txt',  # 当前目录
+        './vocab_mappings.txt',
+        os.path.join(os.path.dirname(__file__), 'vocab_mappings.txt'),  # 脚本所在目录
+        os.path.join(os.path.dirname(__file__), 'crysmmnet-main/src/vocab_mappings.txt'),  # 从根目录
+        '../vocab_mappings.txt',  # 上级目录
+        '../../vocab_mappings.txt',
+    ]
+
+    vocab_file = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            vocab_file = path
+            break
+
+    if vocab_file is None:
+        raise FileNotFoundError(
+            "无法找到 vocab_mappings.txt 文件。请确保：\n"
+            "1. 文件存在于 crysmmnet-main/src/ 目录\n"
+            "2. 当前工作目录正确\n"
+            f"尝试过的路径: {possible_paths}"
+        )
+
+    print(f"使用词汇映射文件: {vocab_file}")
     with open(vocab_file, 'r') as f:
         mappings = f.read().strip().split('\n')
     mappings = {m[0]: m[2:] for m in mappings}
@@ -393,8 +416,16 @@ def main():
 
     # 检查路径是否存在
     if not os.path.exists(cif_dir):
+        print(f"\n❌ 错误: CIF目录不存在: {cif_dir}")
+        print(f"\n提示:")
+        print(f"  1. 检查 --root_dir 参数是否正确")
+        print(f"  2. 当前工作目录: {os.getcwd()}")
+        print(f"  3. 如果在 src 目录下运行，使用: --root_dir ../dataset/")
+        print(f"  4. 如果在项目根目录运行，使用: --root_dir ./crysmmnet-main/dataset/")
         raise FileNotFoundError(f"CIF目录不存在: {cif_dir}")
     if not os.path.exists(id_prop_file):
+        print(f"\n❌ 错误: 描述文件不存在: {id_prop_file}")
+        print(f"\n提示: 请确保数据集已正确下载并解压")
         raise FileNotFoundError(f"描述文件不存在: {id_prop_file}")
 
     # 加载数据集
