@@ -102,9 +102,9 @@ def get_parser():
     parser.add_argument('--hidden_features', type=int, default=256,
                         help='隐藏层特征维度')
 
-    # 跨模态注意力参数
+    # 跨模态注意力参数（晚期融合）
     parser.add_argument('--use_cross_modal', type=bool, default=True,
-                        help='是否使用跨模态注意力')
+                        help='是否使用跨模态注意力（晚期融合）')
     parser.add_argument('--cross_modal_hidden_dim', type=int, default=256,
                         help='跨模态注意力隐藏层维度')
     parser.add_argument('--cross_modal_num_heads', type=int, default=4,
@@ -112,6 +112,19 @@ def get_parser():
                         help='跨模态注意力头数')
     parser.add_argument('--cross_modal_dropout', type=float, default=0.1,
                         help='跨模态注意力dropout率')
+
+    # 中期融合参数
+    parser.add_argument('--use_middle_fusion', type=bool, default=False,
+                        help='是否使用中期融合（在编码过程中注入文本信息）')
+    parser.add_argument('--middle_fusion_layers', type=str, default='2',
+                        help='中期融合注入的层索引（逗号分隔，如 "2" 或 "2,3"）')
+    parser.add_argument('--middle_fusion_hidden_dim', type=int, default=128,
+                        help='中期融合隐藏层维度')
+    parser.add_argument('--middle_fusion_num_heads', type=int, default=2,
+                        choices=[1, 2, 4],
+                        help='中期融合注意力头数')
+    parser.add_argument('--middle_fusion_dropout', type=float, default=0.1,
+                        help='中期融合dropout率')
 
     # 其他参数
     parser.add_argument('--output_dir', type=str, default='./output/',
@@ -318,11 +331,17 @@ def create_config(args):
         embedding_features=64,
         hidden_features=args.hidden_features,
         output_features=1,
-        # 跨模态注意力配置
+        # 跨模态注意力配置（晚期融合）
         use_cross_modal_attention=args.use_cross_modal,
         cross_modal_hidden_dim=args.cross_modal_hidden_dim,
         cross_modal_num_heads=args.cross_modal_num_heads,
         cross_modal_dropout=args.cross_modal_dropout,
+        # 中期融合配置
+        use_middle_fusion=args.use_middle_fusion,
+        middle_fusion_layers=args.middle_fusion_layers,
+        middle_fusion_hidden_dim=args.middle_fusion_hidden_dim,
+        middle_fusion_num_heads=args.middle_fusion_num_heads,
+        middle_fusion_dropout=args.middle_fusion_dropout,
         link="identity",
         zero_inflated=False,
         classification=False
@@ -412,12 +431,20 @@ def main():
     print(f"  GCN层数: {args.gcn_layers}")
     print(f"  隐藏层维度: {args.hidden_features}")
 
-    print(f"\n跨模态注意力配置:")
+    print(f"\n跨模态注意力配置（晚期融合）:")
     print(f"  启用: {args.use_cross_modal}")
     if args.use_cross_modal:
         print(f"  隐藏维度: {args.cross_modal_hidden_dim}")
         print(f"  注意力头数: {args.cross_modal_num_heads}")
         print(f"  Dropout率: {args.cross_modal_dropout}")
+
+    print(f"\n中期融合配置:")
+    print(f"  启用: {args.use_middle_fusion}")
+    if args.use_middle_fusion:
+        print(f"  融合层: {args.middle_fusion_layers}")
+        print(f"  隐藏维度: {args.middle_fusion_hidden_dim}")
+        print(f"  注意力头数: {args.middle_fusion_num_heads}")
+        print(f"  Dropout率: {args.middle_fusion_dropout}")
 
     print(f"\n输出目录: {args.output_dir}")
     print("="*80 + "\n")

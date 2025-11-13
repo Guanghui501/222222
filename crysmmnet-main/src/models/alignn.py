@@ -66,6 +66,115 @@ class ProjectionHead(nn.Module):
         x = self.layer_norm(x)
         return x
 
+class MiddleFusionModule(nn.Module):
+    """Middle fusion module for injecting text information into graph encoding.
+
+    This module performs cross-modal fusion during the intermediate layers of
+    graph encoding, allowing text features to modulate node representations.
+    """
+
+    def __init__(self, node_dim=64, text_dim=64, hidden_dim=128, num_heads=2, dropout=0.1):
+        """Initialize middle fusion module.
+
+        Args:
+            node_dim: Dimension of graph node features
+            text_dim: Dimension of text features
+            hidden_dim: Hidden dimension for attention
+            num_heads: Number of attention heads
+            dropout: Dropout rate
+        """
+        super().__init__()
+        self.node_dim = node_dim
+        self.text_dim = text_dim
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+
+        assert hidden_dim % num_heads == 0, "hidden_dim must be divisible by num_heads"
+
+        # Text-to-Graph attention: text modulates graph nodes
+        self.query = nn.Linear(node_dim, hidden_dim)
+        self.key = nn.Linear(text_dim, hidden_dim)
+        self.value = nn.Linear(text_dim, hidden_dim)
+
+        self.output_proj = nn.Linear(hidden_dim, node_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm = nn.LayerNorm(node_dim)
+        self.scale = self.head_dim ** -0.5
+
+    def forward(self, node_feat, text_feat):
+        """Apply middle fusion.
+
+        Args:
+            node_feat: Node features [batch_size, node_dim] or [total_nodes, node_dim]
+            text_feat: Text features [batch_size, text_dim]
+
+        Returns:
+            Enhanced node features with same shape as input
+        """
+        batch_size = text_feat.size(0)
+
+        # Handle both batched graph and full graph cases
+        if node_feat.size(0) != batch_size:
+            # This is a full graph with all nodes, not batched per sample
+            # We'll apply text feature broadcasting
+            num_nodes = node_feat.size(0)
+
+            # Expand text features to match all nodes
+            # Assuming nodes are ordered by batch, we need batch info
+            # For simplicity, we'll use a global attention mechanism
+            text_feat_expanded = text_feat.unsqueeze(1)  # [batch, 1, text_dim]
+
+            Q = self.query(node_feat).unsqueeze(0)  # [1, num_nodes, hidden]
+            K = self.key(text_feat_expanded)  # [batch, 1, hidden]
+            V = self.value(text_feat_expanded)  # [batch, 1, hidden]
+
+            # Multi-head attention
+            Q = Q.view(1, num_nodes, self.num_heads, self.head_dim).transpose(1, 2)
+            K = K.view(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)
+            V = V.view(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)
+
+            # Compute attention for each sample's text to all nodes
+            # This is approximate - ideally we'd know which nodes belong to which sample
+            attn_scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale  # [1, heads, num_nodes, batch]
+            attn_weights = F.softmax(attn_scores, dim=-1)
+            attn_weights = self.dropout(attn_weights)
+
+            context = torch.matmul(attn_weights, V)  # [1, heads, num_nodes, head_dim]
+            context = context.transpose(1, 2).contiguous().view(1, num_nodes, self.hidden_dim)
+            context = context.squeeze(0)  # [num_nodes, hidden_dim]
+
+        else:
+            # Batched case: one node feature per sample
+            text_feat_expanded = text_feat.unsqueeze(1)  # [batch, 1, text_dim]
+            node_feat_expanded = node_feat.unsqueeze(1)  # [batch, 1, node_dim]
+
+            Q = self.query(node_feat_expanded)  # [batch, 1, hidden]
+            K = self.key(text_feat_expanded)  # [batch, 1, hidden]
+            V = self.value(text_feat_expanded)  # [batch, 1, hidden]
+
+            # Multi-head attention
+            Q = Q.view(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)
+            K = K.view(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)
+            V = V.view(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)
+
+            attn_scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
+            attn_weights = F.softmax(attn_scores, dim=-1)
+            attn_weights = self.dropout(attn_weights)
+
+            context = torch.matmul(attn_weights, V)
+            context = context.transpose(1, 2).contiguous().view(batch_size, 1, self.hidden_dim)
+            context = context.squeeze(1)  # [batch, hidden_dim]
+
+        # Output projection
+        output = self.output_proj(context)
+
+        # Residual connection and layer norm
+        enhanced_node_feat = self.layer_norm(node_feat + output)
+
+        return enhanced_node_feat
+
+
 class CrossModalAttention(nn.Module):
     """Cross-modal attention between graph and text features.
 
@@ -200,11 +309,18 @@ class ALIGNNConfig(BaseSettings):
     # fc_features: int = 64
     output_features: int = 1
 
-    # Cross-modal attention settings
+    # Cross-modal attention settings (late fusion)
     use_cross_modal_attention: bool = True
     cross_modal_hidden_dim: int = 256
     cross_modal_num_heads: int = 4
     cross_modal_dropout: float = 0.1
+
+    # Middle fusion settings
+    use_middle_fusion: bool = False
+    middle_fusion_layers: str = "2"  # Comma-separated layer indices, e.g., "2" or "2,3" for ALIGNN layers
+    middle_fusion_hidden_dim: int = 128
+    middle_fusion_num_heads: int = 2
+    middle_fusion_dropout: float = 0.1
 
     # if link == log, apply `exp` to final outputs
     # to constrain predictions to be positive
@@ -394,6 +510,22 @@ class ALIGNN(nn.Module):
         self.graph_projection = ProjectionHead(embedding_dim=256)
         self.text_projection = ProjectionHead(embedding_dim=768)
 
+        # Middle fusion modules
+        self.use_middle_fusion = config.use_middle_fusion
+        self.middle_fusion_modules = nn.ModuleDict()
+        if self.use_middle_fusion:
+            # Parse middle_fusion_layers string to get layer indices
+            fusion_layers = [int(x.strip()) for x in config.middle_fusion_layers.split(',')]
+            for layer_idx in fusion_layers:
+                self.middle_fusion_modules[f'layer_{layer_idx}'] = MiddleFusionModule(
+                    node_dim=config.hidden_features,
+                    text_dim=64,  # After text_projection
+                    hidden_dim=config.middle_fusion_hidden_dim,
+                    num_heads=config.middle_fusion_num_heads,
+                    dropout=config.middle_fusion_dropout
+                )
+            self.middle_fusion_layer_indices = fusion_layers
+
         # Cross-modal attention module
         self.use_cross_modal_attention = config.use_cross_modal_attention
         if self.use_cross_modal_attention:
@@ -466,8 +598,12 @@ class ALIGNN(nn.Module):
         y = self.edge_embedding(bondlength)
 
         # ALIGNN updates: update node, edge, triplet features
-        for alignn_layer in self.alignn_layers:
+        for idx, alignn_layer in enumerate(self.alignn_layers):
             x, y, z = alignn_layer(g, lg, x, y, z)
+
+            # Apply middle fusion if configured for this layer
+            if self.use_middle_fusion and idx in self.middle_fusion_layer_indices:
+                x = self.middle_fusion_modules[f'layer_{idx}'](x, text_emb)
 
         # gated GCN updates: update node, edge features
         for gcn_layer in self.gcn_layers:
