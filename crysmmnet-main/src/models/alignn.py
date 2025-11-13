@@ -66,6 +66,125 @@ class ProjectionHead(nn.Module):
         x = self.layer_norm(x)
         return x
 
+class CrossModalAttention(nn.Module):
+    """Cross-modal attention between graph and text features.
+
+    This module enables bidirectional attention mechanism where:
+    - Graph features attend to text features
+    - Text features attend to graph features
+    Both modalities are enhanced through this interaction.
+    """
+
+    def __init__(self, graph_dim=256, text_dim=64, hidden_dim=256, num_heads=4, dropout=0.1):
+        """Initialize cross-modal attention.
+
+        Args:
+            graph_dim: Dimension of graph features
+            text_dim: Dimension of text features
+            hidden_dim: Hidden dimension for attention computation
+            num_heads: Number of attention heads
+            dropout: Dropout rate
+        """
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+        assert hidden_dim % num_heads == 0, "hidden_dim must be divisible by num_heads"
+
+        # Graph-to-Text attention (graph queries text)
+        self.g2t_query = nn.Linear(graph_dim, hidden_dim)
+        self.g2t_key = nn.Linear(text_dim, hidden_dim)
+        self.g2t_value = nn.Linear(text_dim, hidden_dim)
+
+        # Text-to-Graph attention (text queries graph)
+        self.t2g_query = nn.Linear(text_dim, hidden_dim)
+        self.t2g_key = nn.Linear(graph_dim, hidden_dim)
+        self.t2g_value = nn.Linear(graph_dim, hidden_dim)
+
+        # Output projections
+        self.graph_output = nn.Linear(hidden_dim, graph_dim)
+        self.text_output = nn.Linear(hidden_dim, text_dim)
+
+        self.dropout = nn.Dropout(dropout)
+        self.layer_norm_graph = nn.LayerNorm(graph_dim)
+        self.layer_norm_text = nn.LayerNorm(text_dim)
+
+        self.scale = self.head_dim ** -0.5
+
+    def split_heads(self, x, batch_size):
+        """Split the last dimension into (num_heads, head_dim)."""
+        x = x.view(batch_size, -1, self.num_heads, self.head_dim)
+        return x.permute(0, 2, 1, 3)  # (batch, heads, seq, head_dim)
+
+    def forward(self, graph_feat, text_feat):
+        """Forward pass of cross-modal attention.
+
+        Args:
+            graph_feat: Graph features [batch_size, graph_dim]
+            text_feat: Text features [batch_size, text_dim]
+
+        Returns:
+            enhanced_graph: Graph features enhanced by text [batch_size, graph_dim]
+            enhanced_text: Text features enhanced by graph [batch_size, text_dim]
+        """
+        batch_size = graph_feat.size(0)
+
+        # Add sequence dimension if needed
+        if graph_feat.dim() == 2:
+            graph_feat_seq = graph_feat.unsqueeze(1)  # [batch, 1, graph_dim]
+        else:
+            graph_feat_seq = graph_feat
+
+        if text_feat.dim() == 2:
+            text_feat_seq = text_feat.unsqueeze(1)  # [batch, 1, text_dim]
+        else:
+            text_feat_seq = text_feat
+
+        # Graph-to-Text Attention: Graph attends to Text
+        Q_g2t = self.g2t_query(graph_feat_seq)  # [batch, 1, hidden]
+        K_g2t = self.g2t_key(text_feat_seq)     # [batch, 1, hidden]
+        V_g2t = self.g2t_value(text_feat_seq)   # [batch, 1, hidden]
+
+        # Multi-head attention
+        Q_g2t = self.split_heads(Q_g2t, batch_size)
+        K_g2t = self.split_heads(K_g2t, batch_size)
+        V_g2t = self.split_heads(V_g2t, batch_size)
+
+        attn_g2t = torch.matmul(Q_g2t, K_g2t.transpose(-2, -1)) * self.scale
+        attn_g2t = F.softmax(attn_g2t, dim=-1)
+        attn_g2t = self.dropout(attn_g2t)
+
+        context_g2t = torch.matmul(attn_g2t, V_g2t)
+        context_g2t = context_g2t.permute(0, 2, 1, 3).contiguous()
+        context_g2t = context_g2t.view(batch_size, 1, self.hidden_dim)
+        context_g2t = self.graph_output(context_g2t).squeeze(1)  # [batch, graph_dim]
+
+        # Text-to-Graph Attention: Text attends to Graph
+        Q_t2g = self.t2g_query(text_feat_seq)   # [batch, 1, hidden]
+        K_t2g = self.t2g_key(graph_feat_seq)    # [batch, 1, hidden]
+        V_t2g = self.t2g_value(graph_feat_seq)  # [batch, 1, hidden]
+
+        # Multi-head attention
+        Q_t2g = self.split_heads(Q_t2g, batch_size)
+        K_t2g = self.split_heads(K_t2g, batch_size)
+        V_t2g = self.split_heads(V_t2g, batch_size)
+
+        attn_t2g = torch.matmul(Q_t2g, K_t2g.transpose(-2, -1)) * self.scale
+        attn_t2g = F.softmax(attn_t2g, dim=-1)
+        attn_t2g = self.dropout(attn_t2g)
+
+        context_t2g = torch.matmul(attn_t2g, V_t2g)
+        context_t2g = context_t2g.permute(0, 2, 1, 3).contiguous()
+        context_t2g = context_t2g.view(batch_size, 1, self.hidden_dim)
+        context_t2g = self.text_output(context_t2g).squeeze(1)  # [batch, text_dim]
+
+        # Residual connection and layer normalization
+        enhanced_graph = self.layer_norm_graph(graph_feat + context_g2t)
+        enhanced_text = self.layer_norm_text(text_feat + context_t2g)
+
+        return enhanced_graph, enhanced_text
+
+
 class ALIGNNConfig(BaseSettings):
     """Hyperparameter schema for jarvisdgl.models.alignn."""
 
@@ -80,6 +199,12 @@ class ALIGNNConfig(BaseSettings):
     # fc_layers: int = 1
     # fc_features: int = 64
     output_features: int = 1
+
+    # Cross-modal attention settings
+    use_cross_modal_attention: bool = True
+    cross_modal_hidden_dim: int = 256
+    cross_modal_num_heads: int = 4
+    cross_modal_dropout: float = 0.1
 
     # if link == log, apply `exp` to final outputs
     # to constrain predictions to be positive
@@ -269,8 +394,23 @@ class ALIGNN(nn.Module):
         self.graph_projection = ProjectionHead(embedding_dim=256)
         self.text_projection = ProjectionHead(embedding_dim=768)
 
-        self.fc1 = nn.Linear(128, 64)
-        self.fc = nn.Linear(64, config.output_features)
+        # Cross-modal attention module
+        self.use_cross_modal_attention = config.use_cross_modal_attention
+        if self.use_cross_modal_attention:
+            self.cross_modal_attention = CrossModalAttention(
+                graph_dim=64,  # After graph_projection
+                text_dim=64,   # After text_projection
+                hidden_dim=config.cross_modal_hidden_dim,
+                num_heads=config.cross_modal_num_heads,
+                dropout=config.cross_modal_dropout
+            )
+            # Fusion layer after cross-modal attention
+            self.fc1 = nn.Linear(64, 64)  # Single modality after fusion
+            self.fc = nn.Linear(64, config.output_features)
+        else:
+            # Original simple concatenation
+            self.fc1 = nn.Linear(128, 64)
+            self.fc = nn.Linear(64, config.output_features)
 
         self.link = None
         self.link_name = config.link
@@ -338,9 +478,18 @@ class ALIGNN(nn.Module):
         h = self.graph_projection(graph_emb)
 
         # Multi-Modal Representation Fusion
-        h = torch.cat((h, text_emb), 1)
-        h = F.relu(self.fc1(h))
-        out = self.fc(h)
+        if self.use_cross_modal_attention:
+            # Cross-modal attention fusion
+            enhanced_graph, enhanced_text = self.cross_modal_attention(h, text_emb)
+            # Average the enhanced features
+            h = (enhanced_graph + enhanced_text) / 2.0
+            h = F.relu(self.fc1(h))
+            out = self.fc(h)
+        else:
+            # Original simple concatenation
+            h = torch.cat((h, text_emb), 1)
+            h = F.relu(self.fc1(h))
+            out = self.fc(h)
 
         if self.link:
             out = self.link(out)
