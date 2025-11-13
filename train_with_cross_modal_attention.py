@@ -293,6 +293,30 @@ def load_dataset(cif_dir, id_prop_file, dataset, property_name):
 def create_config(args):
     """根据命令行参数创建训练配置"""
 
+    # 导入 ALIGNNConfig
+    from models.alignn import ALIGNNConfig
+
+    # 创建模型配置对象
+    model_config = ALIGNNConfig(
+        name="alignn",
+        alignn_layers=args.alignn_layers,
+        gcn_layers=args.gcn_layers,
+        atom_input_features=92,
+        edge_input_features=80,
+        triplet_input_features=40,
+        embedding_features=64,
+        hidden_features=args.hidden_features,
+        output_features=1,
+        # 跨模态注意力配置
+        use_cross_modal_attention=args.use_cross_modal,
+        cross_modal_hidden_dim=args.cross_modal_hidden_dim,
+        cross_modal_num_heads=args.cross_modal_num_heads,
+        cross_modal_dropout=args.cross_modal_dropout,
+        link="identity",
+        zero_inflated=False,
+        classification=False
+    )
+
     config = {
         "version": "cross_modal_attention_v1",
         "dataset": args.dataset,
@@ -341,28 +365,8 @@ def create_config(args):
         "n_early_stopping": None,
         "output_dir": args.output_dir,
 
-        # 模型配置
-        "model": {
-            "name": "alignn",
-            "alignn_layers": args.alignn_layers,
-            "gcn_layers": args.gcn_layers,
-            "atom_input_features": 92,
-            "edge_input_features": 80,
-            "triplet_input_features": 40,
-            "embedding_features": 64,
-            "hidden_features": args.hidden_features,
-            "output_features": 1,
-
-            # 跨模态注意力配置
-            "use_cross_modal_attention": args.use_cross_modal,
-            "cross_modal_hidden_dim": args.cross_modal_hidden_dim,
-            "cross_modal_num_heads": args.cross_modal_num_heads,
-            "cross_modal_dropout": args.cross_modal_dropout,
-
-            "link": "identity",
-            "zero_inflated": False,
-            "classification": False
-        }
+        # 模型配置对象（而不是字典）
+        "model": model_config
     }
 
     return config
