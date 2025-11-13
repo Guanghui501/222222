@@ -71,6 +71,8 @@ class MiddleFusionModule(nn.Module):
 
     This module performs cross-modal fusion during the intermediate layers of
     graph encoding, allowing text features to modulate node representations.
+
+    Uses a simple gated fusion mechanism that works with DGL batched graphs.
     """
 
     def __init__(self, node_dim=64, text_dim=64, hidden_dim=128, num_heads=2, dropout=0.1):
@@ -79,100 +81,79 @@ class MiddleFusionModule(nn.Module):
         Args:
             node_dim: Dimension of graph node features
             text_dim: Dimension of text features
-            hidden_dim: Hidden dimension for attention
-            num_heads: Number of attention heads
+            hidden_dim: Hidden dimension for fusion
+            num_heads: Number of attention heads (for future compatibility)
             dropout: Dropout rate
         """
         super().__init__()
         self.node_dim = node_dim
         self.text_dim = text_dim
         self.hidden_dim = hidden_dim
-        self.num_heads = num_heads
-        self.head_dim = hidden_dim // num_heads
 
-        assert hidden_dim % num_heads == 0, "hidden_dim must be divisible by num_heads"
+        # Text transformation
+        self.text_transform = nn.Sequential(
+            nn.Linear(text_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, node_dim)
+        )
 
-        # Text-to-Graph attention: text modulates graph nodes
-        self.query = nn.Linear(node_dim, hidden_dim)
-        self.key = nn.Linear(text_dim, hidden_dim)
-        self.value = nn.Linear(text_dim, hidden_dim)
+        # Gate mechanism to control text influence
+        self.gate = nn.Sequential(
+            nn.Linear(node_dim + node_dim, node_dim),
+            nn.Sigmoid()
+        )
 
-        self.output_proj = nn.Linear(hidden_dim, node_dim)
-        self.dropout = nn.Dropout(dropout)
         self.layer_norm = nn.LayerNorm(node_dim)
-        self.scale = self.head_dim ** -0.5
+        self.dropout = nn.Dropout(dropout)
 
-    def forward(self, node_feat, text_feat):
-        """Apply middle fusion.
+    def forward(self, node_feat, text_feat, batch_num_nodes=None):
+        """Apply middle fusion using gated mechanism.
 
         Args:
-            node_feat: Node features [batch_size, node_dim] or [total_nodes, node_dim]
+            node_feat: Node features [total_nodes, node_dim] (for batched graphs)
+                      or [batch_size, node_dim] (for pooled features)
             text_feat: Text features [batch_size, text_dim]
+            batch_num_nodes: List of number of nodes in each graph (optional)
 
         Returns:
             Enhanced node features with same shape as input
         """
         batch_size = text_feat.size(0)
+        num_nodes = node_feat.size(0)
 
-        # Handle both batched graph and full graph cases
-        if node_feat.size(0) != batch_size:
-            # This is a full graph with all nodes, not batched per sample
-            # We'll apply text feature broadcasting
-            num_nodes = node_feat.size(0)
+        # Transform text features
+        text_transformed = self.text_transform(text_feat)  # [batch_size, node_dim]
 
-            # Expand text features to match all nodes
-            # Assuming nodes are ordered by batch, we need batch info
-            # For simplicity, we'll use a global attention mechanism
-            text_feat_expanded = text_feat.unsqueeze(1)  # [batch, 1, text_dim]
+        # Case 1: Batched graphs (total_nodes != batch_size)
+        if num_nodes != batch_size:
+            # Broadcast text features to all nodes
+            # Simple approach: repeat text features proportionally to nodes per graph
+            if batch_num_nodes is not None:
+                # Use provided batch information
+                text_expanded = []
+                for i, num in enumerate(batch_num_nodes):
+                    text_expanded.append(text_transformed[i].unsqueeze(0).repeat(num, 1))
+                text_broadcasted = torch.cat(text_expanded, dim=0)  # [total_nodes, node_dim]
+            else:
+                # Fallback: use average pooling of text and broadcast
+                text_pooled = text_transformed.mean(dim=0, keepdim=True)  # [1, node_dim]
+                text_broadcasted = text_pooled.repeat(num_nodes, 1)  # [total_nodes, node_dim]
 
-            Q = self.query(node_feat).unsqueeze(0)  # [1, num_nodes, hidden]
-            K = self.key(text_feat_expanded)  # [batch, 1, hidden]
-            V = self.value(text_feat_expanded)  # [batch, 1, hidden]
-
-            # Multi-head attention
-            Q = Q.view(1, num_nodes, self.num_heads, self.head_dim).transpose(1, 2)
-            K = K.view(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)
-            V = V.view(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)
-
-            # Compute attention for each sample's text to all nodes
-            # This is approximate - ideally we'd know which nodes belong to which sample
-            attn_scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale  # [1, heads, num_nodes, batch]
-            attn_weights = F.softmax(attn_scores, dim=-1)
-            attn_weights = self.dropout(attn_weights)
-
-            context = torch.matmul(attn_weights, V)  # [1, heads, num_nodes, head_dim]
-            context = context.transpose(1, 2).contiguous().view(1, num_nodes, self.hidden_dim)
-            context = context.squeeze(0)  # [num_nodes, hidden_dim]
-
+        # Case 2: Already pooled features (one per graph)
         else:
-            # Batched case: one node feature per sample
-            text_feat_expanded = text_feat.unsqueeze(1)  # [batch, 1, text_dim]
-            node_feat_expanded = node_feat.unsqueeze(1)  # [batch, 1, node_dim]
+            text_broadcasted = text_transformed  # [batch_size, node_dim]
 
-            Q = self.query(node_feat_expanded)  # [batch, 1, hidden]
-            K = self.key(text_feat_expanded)  # [batch, 1, hidden]
-            V = self.value(text_feat_expanded)  # [batch, 1, hidden]
+        # Gated fusion
+        gate_input = torch.cat([node_feat, text_broadcasted], dim=-1)  # [*, node_dim*2]
+        gate_values = self.gate(gate_input)  # [*, node_dim]
 
-            # Multi-head attention
-            Q = Q.view(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)
-            K = K.view(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)
-            V = V.view(batch_size, 1, self.num_heads, self.head_dim).transpose(1, 2)
+        # Apply gating and residual connection
+        enhanced = node_feat + gate_values * text_broadcasted
+        enhanced = self.layer_norm(enhanced)
+        enhanced = self.dropout(enhanced)
 
-            attn_scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
-            attn_weights = F.softmax(attn_scores, dim=-1)
-            attn_weights = self.dropout(attn_weights)
-
-            context = torch.matmul(attn_weights, V)
-            context = context.transpose(1, 2).contiguous().view(batch_size, 1, self.hidden_dim)
-            context = context.squeeze(1)  # [batch, hidden_dim]
-
-        # Output projection
-        output = self.output_proj(context)
-
-        # Residual connection and layer norm
-        enhanced_node_feat = self.layer_norm(node_feat + output)
-
-        return enhanced_node_feat
+        return enhanced
 
 
 class CrossModalAttention(nn.Module):
@@ -603,7 +584,9 @@ class ALIGNN(nn.Module):
 
             # Apply middle fusion if configured for this layer
             if self.use_middle_fusion and idx in self.middle_fusion_layer_indices:
-                x = self.middle_fusion_modules[f'layer_{idx}'](x, text_emb)
+                # Get batch information for proper text broadcasting
+                batch_num_nodes = g.batch_num_nodes().tolist()
+                x = self.middle_fusion_modules[f'layer_{idx}'](x, text_emb, batch_num_nodes)
 
         # gated GCN updates: update node, edge features
         for gcn_layer in self.gcn_layers:
