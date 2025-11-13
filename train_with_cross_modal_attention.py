@@ -450,10 +450,23 @@ def main():
     config_dict = create_config(args)
     config_dict['output_dir'] = output_dir
 
-    # 保存配置
+    # 保存配置（将 ALIGNNConfig 对象转换为字典以便 JSON 序列化）
     config_file = os.path.join(output_dir, 'config.json')
+    config_dict_serializable = config_dict.copy()
+
+    # 转换 model 配置对象为字典
+    if hasattr(config_dict['model'], 'dict'):
+        # Pydantic v1
+        config_dict_serializable['model'] = config_dict['model'].dict()
+    elif hasattr(config_dict['model'], 'model_dump'):
+        # Pydantic v2
+        config_dict_serializable['model'] = config_dict['model'].model_dump()
+    else:
+        # 尝试使用 __dict__
+        config_dict_serializable['model'] = config_dict['model'].__dict__
+
     with open(config_file, 'w') as f:
-        json.dump(config_dict, f, indent=4)
+        json.dump(config_dict_serializable, f, indent=4)
     print(f"配置已保存到: {config_file}\n")
 
     # 转换为TrainingConfig对象
