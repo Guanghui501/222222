@@ -61,7 +61,50 @@ def normalize_text(text, mappings):
     return text
 
 
-def preprocess_dataset(dataset, property_name, output_dir='preprocessed_data'):
+def get_dataset_paths(root_dir, dataset, property_name):
+    """根据数据集和性质获取数据路径（与训练脚本保持一致）"""
+
+    if dataset.lower() == 'jarvis':
+        # JARVIS-DFT 数据集
+        property_map = {
+            'formation_energy': 'formation_energy_peratom',
+            'fe': 'formation_energy_peratom',
+            'total_energy': 'optb88vdw_total_energy',
+            'opt_bandgap': 'optb88vdw_bandgap',
+            'mbj_bandgap': 'mbj_bandgap',
+            'bulk_modulus': 'bulk_modulus_kv',
+            'bulk_modulus_kv': 'bulk_modulus_kv',
+            'shear_modulus': 'shear_modulus_gv',
+            'shear_modulus_gv': 'shear_modulus_gv',
+        }
+
+        prop_folder = property_map.get(property_name, property_name)
+        cif_dir = os.path.join(root_dir, f'jarvis/{prop_folder}/cif/')
+        id_prop_file = os.path.join(root_dir, f'jarvis/{prop_folder}/description.csv')
+
+    elif dataset.lower() == 'mp':
+        # Material Project 数据集
+        if property_name in ['formation_energy', 'band_gap']:
+            cif_dir = os.path.join(root_dir, 'mp_2018_new/')
+            id_prop_file = os.path.join(root_dir, 'mp_2018_new/mat_text.csv')
+        elif property_name in ['bulk', 'shear', 'bulk_modulus', 'shear_modulus']:
+            cif_dir = os.path.join(root_dir, 'mp_2018_small/cif/')
+            id_prop_file = os.path.join(root_dir, 'mp_2018_small/description.csv')
+        else:
+            raise ValueError(f"Unsupported property for MP dataset: {property_name}")
+
+    elif dataset.lower() == 'toy':
+        # 玩具数据集（用于测试）
+        cif_dir = os.path.join(root_dir, 'toy/cif/')
+        id_prop_file = os.path.join(root_dir, 'toy/description.csv')
+
+    else:
+        raise ValueError(f"Unsupported dataset: {dataset}")
+
+    return cif_dir, id_prop_file
+
+
+def preprocess_dataset(dataset, property_name, root_dir='../dataset/', output_dir='preprocessed_data'):
     """预处理整个数据集"""
 
     print(f"\n{'='*80}")
@@ -71,34 +114,8 @@ def preprocess_dataset(dataset, property_name, output_dir='preprocessed_data'):
     # 创建输出目录
     os.makedirs(output_dir, exist_ok=True)
 
-    # 数据集路径映射
-    dataset_paths = {
-        'jarvis': {
-            'cif_dir': 'crysmmnet-main/data/cif_files',
-            'id_prop_file': 'crysmmnet-main/data/id_prop.csv'
-        },
-        'matbench': {
-            'cif_dir': 'crysmmnet-main/data/megnet_cif_files',
-            'id_prop_file': 'crysmmnet-main/data/megnet_id_prop.csv'
-        }
-    }
-
-    # 数据集名称映射
-    dataset_name_mapping = {
-        'jarvis': 'jarvis',
-        'dft_3d': 'jarvis',
-        'matbench': 'megnet',
-        'megnet': 'megnet',
-    }
-
-    actual_dataset = dataset_name_mapping.get(dataset.lower(), dataset.lower())
-
-    if actual_dataset not in dataset_paths:
-        raise ValueError(f"不支持的数据集: {dataset}")
-
-    paths = dataset_paths[actual_dataset]
-    cif_dir = paths['cif_dir']
-    id_prop_file = paths['id_prop_file']
+    # 使用与训练脚本一致的路径获取逻辑
+    cif_dir, id_prop_file = get_dataset_paths(root_dir, dataset, property_name)
 
     print(f"CIF 目录: {cif_dir}")
     print(f"描述文件: {id_prop_file}")
@@ -187,10 +204,10 @@ def preprocess_dataset(dataset, property_name, output_dir='preprocessed_data'):
                 skipped += 1
                 continue
 
-        # 保存预处理数据
+        # 保存预处理数据（使用dataset名称，与训练脚本一致）
         output_file = os.path.join(
             output_dir,
-            f"{actual_dataset}_{property_name}_{split_name}.pkl"
+            f"{dataset.lower()}_{property_name}_{split_name}.pkl"
         )
 
         print(f"\n保存预处理数据到: {output_file}")
@@ -208,9 +225,9 @@ def preprocess_dataset(dataset, property_name, output_dir='preprocessed_data'):
     print(f"预处理完成！")
     print(f"{'='*80}\n")
     print(f"生成的文件位于: {output_dir}/")
-    print(f"  - {actual_dataset}_{property_name}_train.pkl")
-    print(f"  - {actual_dataset}_{property_name}_val.pkl")
-    print(f"  - {actual_dataset}_{property_name}_test.pkl")
+    print(f"  - {dataset.lower()}_{property_name}_train.pkl")
+    print(f"  - {dataset.lower()}_{property_name}_val.pkl")
+    print(f"  - {dataset.lower()}_{property_name}_test.pkl")
     print(f"\n使用预处理数据训练:")
     print(f"  python train_with_cross_modal_attention.py \\")
     print(f"    --dataset {dataset} \\")
@@ -222,11 +239,14 @@ def main():
     parser = argparse.ArgumentParser(description='预处理图数据')
 
     parser.add_argument('--dataset', type=str, default='jarvis',
-                       choices=['jarvis', 'dft_3d', 'matbench', 'megnet'],
+                       choices=['jarvis', 'mp', 'toy'],
                        help='数据集名称')
 
     parser.add_argument('--property', type=str, default='mbj_bandgap',
                        help='目标属性名称')
+
+    parser.add_argument('--root_dir', type=str, default='../dataset/',
+                       help='数据集根目录（与训练脚本保持一致）')
 
     parser.add_argument('--output_dir', type=str, default='preprocessed_data',
                        help='输出目录')
@@ -236,6 +256,7 @@ def main():
     preprocess_dataset(
         dataset=args.dataset,
         property_name=args.property,
+        root_dir=args.root_dir,
         output_dir=args.output_dir
     )
 

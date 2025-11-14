@@ -215,26 +215,17 @@ def load_preprocessed_dataset(preprocessed_dir, dataset, property_name):
     """
     import pickle
 
-    # 数据集名称映射
-    dataset_name_mapping = {
-        'jarvis': 'jarvis',
-        'dft_3d': 'jarvis',
-        'matbench': 'megnet',
-        'megnet': 'megnet',
-    }
-    actual_dataset = dataset_name_mapping.get(dataset.lower(), dataset.lower())
-
     print(f"\n{'='*60}")
     print(f"加载预处理数据集: {dataset} - {property_name}")
     print(f"预处理目录: {preprocessed_dir}")
     print(f"{'='*60}\n")
 
-    # 加载三个数据集
+    # 加载三个数据集（使用dataset名称，与preprocess_graphs.py一致）
     splits = {}
     for split_name in ['train', 'val', 'test']:
         pkl_file = os.path.join(
             preprocessed_dir,
-            f"{actual_dataset}_{property_name}_{split_name}.pkl"
+            f"{dataset.lower()}_{property_name}_{split_name}.pkl"
         )
 
         if not os.path.exists(pkl_file):
