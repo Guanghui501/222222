@@ -387,7 +387,8 @@ def train_dgl(config: Union[TrainingConfig, Dict[str, Any]],model: nn.Module = N
     predictions = []
     with torch.no_grad():
         ids = test_loader.dataset.ids  # [test_loader.dataset.indices]
-        for dat, id in zip(test_loader, ids):
+        sample_idx = 0  # 追踪当前样本索引
+        for dat in test_loader:
             # g, lg, target = dat
             # out_data = net([g.to(device), lg.to(device)])
             g, lg, text, target = dat
@@ -402,14 +403,23 @@ def train_dgl(config: Union[TrainingConfig, Dict[str, Any]],model: nn.Module = N
                     0
                 ][0]
             target = target.cpu().numpy().flatten().tolist()
-            if len(target) == 1:
-                target = target[0]
-            for k in range(len(target)):
+
+            # 处理batch中的每个样本
+            batch_size = len(target) if isinstance(target, list) else 1
+            if batch_size == 1 and not isinstance(target, list):
+                target = [target]
+                out_data = [out_data]
+
+            for k in range(batch_size):
+                # 获取当前样本的id
+                id = ids[sample_idx + k]
                 # 将负数预测值统一为0
                 pred_value = max(0.0, out_data[k])
                 f.write("%s, %6f, %6f\n" % (id, target[k], pred_value))
                 targets.append(target[k])
                 predictions.append(pred_value)
+
+            sample_idx += batch_size
     f.close()
     from sklearn.metrics import mean_absolute_error
     # print(targets)
