@@ -360,6 +360,78 @@ def generate_crystal_description(atoms):
     return description
 
 
+def generate_description_from_extracted_data(cif_path, extracted_data, file_stem):
+    """
+    从提取的数据生成描述（完全不依赖JARVIS）
+
+    Args:
+        cif_path: CIF文件路径
+        extracted_data: extract_with_pmg 或 extract_with_ase_spglib 返回的数据
+        file_stem: 文件名（用于获取composition的备用方案）
+
+    Returns:
+        tuple: (composition, description)
+    """
+    sgnum = extracted_data["spacegroup_number"]
+    crystal_system = extracted_data["crystal_system"]
+    lattice = extracted_data["lattice"]
+    wyckoff_sites = extracted_data["wyckoff_sites"]
+
+    # 从Wyckoff位置获取composition
+    if wyckoff_sites:
+        element_counts = {}
+        for site in wyckoff_sites:
+            elem = site['element']
+            mult = site['multiplicity']
+            element_counts[elem] = element_counts.get(elem, 0) + mult
+
+        # 简化化学式
+        from math import gcd
+        from functools import reduce
+        counts = list(element_counts.values())
+        if counts:
+            divisor = reduce(gcd, counts)
+            composition = ''.join([f"{elem}{element_counts[elem]//divisor if element_counts[elem]//divisor > 1 else ''}"
+                                   for elem in sorted(element_counts.keys())])
+        else:
+            composition = file_stem
+    else:
+        composition = file_stem
+
+    # 构建详细描述
+    description = f"{composition} crystal with {crystal_system} lattice system and space group No. {sgnum}. "
+
+    # 添加晶格参数
+    a, b, c = lattice['a'], lattice['b'], lattice['c']
+    alpha, beta, gamma = lattice['alpha'], lattice['beta'], lattice['gamma']
+
+    if crystal_system == "cubic":
+        description += f"Cubic lattice parameter a={a:.3f} Å. "
+    elif crystal_system == "tetragonal":
+        description += f"Tetragonal lattice: a={a:.3f} Å, c={c:.3f} Å. "
+    elif crystal_system == "orthorhombic":
+        description += f"Orthorhombic lattice: a={a:.3f} Å, b={b:.3f} Å, c={c:.3f} Å. "
+    elif crystal_system == "hexagonal":
+        description += f"Hexagonal lattice: a={a:.3f} Å, c={c:.3f} Å. "
+    else:
+        description += f"Lattice parameters: a={a:.3f} Å, b={b:.3f} Å, c={c:.3f} Å, α={alpha:.1f}°, β={beta:.1f}°, γ={gamma:.1f}°. "
+
+    # 添加Wyckoff位置信息
+    if wyckoff_sites:
+        description += f"Contains {len(wyckoff_sites)} crystallographic sites: "
+        site_descriptions = []
+        for site in wyckoff_sites[:6]:  # 最多描述6个位置
+            element = site['element']
+            wyckoff = site['wyckoff']
+            site_descriptions.append(f"{element} at {wyckoff}")
+        description += ", ".join(site_descriptions)
+        if len(wyckoff_sites) > 6:
+            description += f", and {len(wyckoff_sites)-6} more sites"
+        description += "."
+
+    return composition, description
+
+
 def process_single_cif(cif_file, label, prefix, cif_output_dir):
     """
     处理单个CIF文件的工作函数（用于多进程）
@@ -373,38 +445,83 @@ def process_single_cif(cif_file, label, prefix, cif_output_dir):
     Returns:
         dict: 成功返回数据字典，失败返回包含error的字典
     """
+    composition = None
+    description = None
+    atoms = None
+    method_used = None
+
+    # 策略1: 尝试使用JARVIS加载
     try:
-        # Suppress stderr to hide "cif2cell: command not found" warnings
         stderr_buffer = io.StringIO()
         with contextlib.redirect_stderr(stderr_buffer):
             atoms = Atoms.from_cif(str(cif_file))
 
         composition = atoms.composition.reduced_formula
-
-        # 使用增强版描述（包含Wyckoff位置信息）
         description = generate_crystal_description_enhanced(cif_file, atoms)
+        method_used = "JARVIS"
+    except Exception as e1:
+        # JARVIS失败，尝试策略2: 直接使用pymatgen
+        try:
+            extracted = extract_with_pmg(cif_file)
+            if extracted is not None:
+                composition, description = generate_description_from_extracted_data(
+                    cif_file, extracted, cif_file.stem
+                )
+                method_used = "pymatgen"
+            else:
+                raise Exception("pymatgen extraction returned None")
+        except Exception as e2:
+            # pymatgen也失败，尝试策略3: 使用ase+spglib
+            try:
+                extracted = extract_with_ase_spglib(cif_file)
+                if extracted is not None:
+                    composition, description = generate_description_from_extracted_data(
+                        cif_file, extracted, cif_file.stem
+                    )
+                    method_used = "ase+spglib"
+                else:
+                    raise Exception("ase+spglib extraction returned None")
+            except Exception as e3:
+                # 所有方法都失败
+                error_msg = f"JARVIS: {str(e1)[:50]}; pymatgen: {str(e2)[:50]}; ase: {str(e3)[:50]}"
+                return {
+                    'success': False,
+                    'error': error_msg,
+                    'error_type': 'all_methods_failed',
+                    'original_file': cif_file.name
+                }
 
-        # 生成唯一ID
-        file_id = f"{prefix}_{cif_file.stem}"
+    # 如果成功获取了composition和description
+    if composition and description:
+        try:
+            # 生成唯一ID
+            file_id = f"{prefix}_{cif_file.stem}"
 
-        # 复制CIF文件到输出目录
-        new_cif_path = cif_output_dir / f"{file_id}.cif"
-        shutil.copy(cif_file, new_cif_path)
+            # 复制CIF文件到输出目录
+            new_cif_path = cif_output_dir / f"{file_id}.cif"
+            shutil.copy(cif_file, new_cif_path)
 
-        return {
-            'id': file_id,
-            'composition': composition,
-            'label': label,
-            'text': description,
-            'original_file': cif_file.name,
-            'success': True
-        }
-    except Exception as e:
-        error_msg = str(e)
+            return {
+                'id': file_id,
+                'composition': composition,
+                'label': label,
+                'text': description,
+                'original_file': cif_file.name,
+                'method': method_used,
+                'success': True
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e),
+                'error_type': 'file_copy_failed',
+                'original_file': cif_file.name
+            }
+    else:
         return {
             'success': False,
-            'error': error_msg,
-            'error_type': 'no_coords' if 'Cannot find atomic coordinate' in error_msg else 'other',
+            'error': 'Unknown error in processing',
+            'error_type': 'unknown',
             'original_file': cif_file.name
         }
 
@@ -482,8 +599,9 @@ def prepare_synthesizability_dataset(
     positive_cifs = list(Path(positive_dir).glob('*.cif'))
     print(f"  找到 {len(positive_cifs)} 个CIF文件")
 
-    # 统计错误类型
-    error_stats = {'no_coords': 0, 'other': 0}
+    # 统计错误类型和方法使用
+    error_stats = {}
+    method_stats = {'JARVIS': 0, 'pymatgen': 0, 'ase+spglib': 0}
     skipped_files = []
 
     # 使用多进程处理
@@ -509,9 +627,13 @@ def prepare_synthesizability_dataset(
                         'text': result['text'],
                         'original_file': result['original_file']
                     })
+                    # 统计使用的方法
+                    method = result.get('method', 'unknown')
+                    method_stats[method] = method_stats.get(method, 0) + 1
                 else:
                     # 失败的样本
-                    error_stats[result['error_type']] += 1
+                    error_type = result['error_type']
+                    error_stats[error_type] = error_stats.get(error_type, 0) + 1
                     if len(skipped_files) < 10:
                         skipped_files.append((result['original_file'], result['error']))
 
@@ -519,16 +641,20 @@ def prepare_synthesizability_dataset(
 
     # Print summary
     successful = sum(1 for d in all_data if d['label']==1)
-    total_errors = error_stats['no_coords'] + error_stats['other']
-    print(f"  ✅ 成功加载 {successful} 个正样本")
+    total_errors = sum(error_stats.values())
+    print(f"  ✅ 成功加载 {successful} 个正样本 (成功率: {successful/len(positive_cifs)*100:.1f}%)")
+    print(f"  📊 方法统计:")
+    for method, count in sorted(method_stats.items(), key=lambda x: -x[1]):
+        if count > 0:
+            print(f"      - {method}: {count} ({count/successful*100:.1f}%)")
     if total_errors > 0:
-        print(f"  ⚠️  跳过 {total_errors} 个文件:")
-        print(f"      - 缺少坐标信息: {error_stats['no_coords']}")
-        print(f"      - 其他错误: {error_stats['other']}")
+        print(f"  ⚠️  跳过 {total_errors} 个文件 ({total_errors/len(positive_cifs)*100:.1f}%):")
+        for error_type, count in sorted(error_stats.items(), key=lambda x: -x[1]):
+            print(f"      - {error_type}: {count}")
         if skipped_files:
-            print(f"  前{len(skipped_files)}个错误示例:")
+            print(f"  前{min(3, len(skipped_files))}个错误示例:")
             for fname, err in skipped_files[:3]:
-                print(f"      {fname}: {err[:60]}...")
+                print(f"      {fname}: {err[:80]}...")
 
     # 处理不可合成晶体（负样本）
     print(f"\n处理不可合成晶体 (负样本, label=0):")
@@ -537,8 +663,9 @@ def prepare_synthesizability_dataset(
     negative_cifs = list(Path(negative_dir).glob('*.cif'))
     print(f"  找到 {len(negative_cifs)} 个CIF文件")
 
-    # 统计错误类型
-    error_stats_neg = {'no_coords': 0, 'other': 0}
+    # 统计错误类型和方法使用
+    error_stats_neg = {}
+    method_stats_neg = {'JARVIS': 0, 'pymatgen': 0, 'ase+spglib': 0}
     skipped_files_neg = []
 
     # 使用多进程处理
@@ -564,9 +691,13 @@ def prepare_synthesizability_dataset(
                         'text': result['text'],
                         'original_file': result['original_file']
                     })
+                    # 统计使用的方法
+                    method = result.get('method', 'unknown')
+                    method_stats_neg[method] = method_stats_neg.get(method, 0) + 1
                 else:
                     # 失败的样本
-                    error_stats_neg[result['error_type']] += 1
+                    error_type = result['error_type']
+                    error_stats_neg[error_type] = error_stats_neg.get(error_type, 0) + 1
                     if len(skipped_files_neg) < 10:
                         skipped_files_neg.append((result['original_file'], result['error']))
 
@@ -574,16 +705,20 @@ def prepare_synthesizability_dataset(
 
     # Print summary
     successful_neg = sum(1 for d in all_data if d['label']==0)
-    total_errors_neg = error_stats_neg['no_coords'] + error_stats_neg['other']
-    print(f"  ✅ 成功加载 {successful_neg} 个负样本")
+    total_errors_neg = sum(error_stats_neg.values())
+    print(f"  ✅ 成功加载 {successful_neg} 个负样本 (成功率: {successful_neg/len(negative_cifs)*100:.1f}%)")
+    print(f"  📊 方法统计:")
+    for method, count in sorted(method_stats_neg.items(), key=lambda x: -x[1]):
+        if count > 0:
+            print(f"      - {method}: {count} ({count/successful_neg*100:.1f}%)")
     if total_errors_neg > 0:
-        print(f"  ⚠️  跳过 {total_errors_neg} 个文件:")
-        print(f"      - 缺少坐标信息: {error_stats_neg['no_coords']}")
-        print(f"      - 其他错误: {error_stats_neg['other']}")
+        print(f"  ⚠️  跳过 {total_errors_neg} 个文件 ({total_errors_neg/len(negative_cifs)*100:.1f}%):")
+        for error_type, count in sorted(error_stats_neg.items(), key=lambda x: -x[1]):
+            print(f"      - {error_type}: {count}")
         if skipped_files_neg:
-            print(f"  前{len(skipped_files_neg)}个错误示例:")
+            print(f"  前{min(3, len(skipped_files_neg))}个错误示例:")
             for fname, err in skipped_files_neg[:3]:
-                print(f"      {fname}: {err[:60]}...")
+                print(f"      {fname}: {err[:80]}...")
 
     # 统计
     total_samples = len(all_data)
