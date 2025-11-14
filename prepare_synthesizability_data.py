@@ -19,6 +19,10 @@ from jarvis.core.atoms import Atoms
 from tqdm import tqdm
 import random
 import numpy as np
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import io
+import contextlib
+import shutil
 
 # Suppress JARVIS warnings and deprecation warnings
 warnings.filterwarnings('ignore', category=DeprecationWarning)
@@ -356,6 +360,55 @@ def generate_crystal_description(atoms):
     return description
 
 
+def process_single_cif(cif_file, label, prefix, cif_output_dir):
+    """
+    处理单个CIF文件的工作函数（用于多进程）
+
+    Args:
+        cif_file: Path对象，CIF文件路径
+        label: int，标签（1=可合成，0=不可合成）
+        prefix: str，ID前缀（"synth_pos" 或 "synth_neg"）
+        cif_output_dir: Path对象，输出目录
+
+    Returns:
+        dict: 成功返回数据字典，失败返回包含error的字典
+    """
+    try:
+        # Suppress stderr to hide "cif2cell: command not found" warnings
+        stderr_buffer = io.StringIO()
+        with contextlib.redirect_stderr(stderr_buffer):
+            atoms = Atoms.from_cif(str(cif_file))
+
+        composition = atoms.composition.reduced_formula
+
+        # 使用增强版描述（包含Wyckoff位置信息）
+        description = generate_crystal_description_enhanced(cif_file, atoms)
+
+        # 生成唯一ID
+        file_id = f"{prefix}_{cif_file.stem}"
+
+        # 复制CIF文件到输出目录
+        new_cif_path = cif_output_dir / f"{file_id}.cif"
+        shutil.copy(cif_file, new_cif_path)
+
+        return {
+            'id': file_id,
+            'composition': composition,
+            'label': label,
+            'text': description,
+            'original_file': cif_file.name,
+            'success': True
+        }
+    except Exception as e:
+        error_msg = str(e)
+        return {
+            'success': False,
+            'error': error_msg,
+            'error_type': 'no_coords' if 'Cannot find atomic coordinate' in error_msg else 'other',
+            'original_file': cif_file.name
+        }
+
+
 def prepare_synthesizability_dataset(
     positive_dir,
     negative_dir,
@@ -363,7 +416,8 @@ def prepare_synthesizability_dataset(
     train_ratio=0.8,
     val_ratio=0.1,
     test_ratio=0.1,
-    random_seed=42
+    random_seed=42,
+    workers=16
 ):
     """
     准备可合成性分类数据集
@@ -376,6 +430,7 @@ def prepare_synthesizability_dataset(
         val_ratio: 验证集比例
         test_ratio: 测试集比例
         random_seed: 随机种子
+        workers: 并行处理的进程数（默认16）
     """
 
     print("\n" + "="*80)
@@ -415,6 +470,7 @@ def prepare_synthesizability_dataset(
 
     print(f"\n输出目录: {output_dir}")
     print(f"CIF目录: {cif_output_dir}")
+    print(f"并行进程数: {workers}")
 
     # 收集所有数据
     all_data = []
@@ -430,49 +486,36 @@ def prepare_synthesizability_dataset(
     error_stats = {'no_coords': 0, 'other': 0}
     skipped_files = []
 
-    import shutil
-    for cif_file in tqdm(positive_cifs, desc="  加载正样本",
-                         bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'):
-        try:
-            # Suppress stderr to hide "cif2cell: command not found" warnings
-            import io
-            import contextlib
+    # 使用多进程处理
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        # 提交所有任务
+        futures = {
+            executor.submit(process_single_cif, cif_file, 1, "synth_pos", cif_output_dir): cif_file
+            for cif_file in positive_cifs
+        }
 
-            # Capture stderr
-            stderr_buffer = io.StringIO()
-            with contextlib.redirect_stderr(stderr_buffer):
-                atoms = Atoms.from_cif(str(cif_file))
+        # 使用tqdm显示进度
+        with tqdm(total=len(positive_cifs), desc="  加载正样本",
+                  bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+            for future in as_completed(futures):
+                result = future.result()
 
-            composition = atoms.composition.reduced_formula
+                if result['success']:
+                    # 成功处理的样本
+                    all_data.append({
+                        'id': result['id'],
+                        'composition': result['composition'],
+                        'label': result['label'],
+                        'text': result['text'],
+                        'original_file': result['original_file']
+                    })
+                else:
+                    # 失败的样本
+                    error_stats[result['error_type']] += 1
+                    if len(skipped_files) < 10:
+                        skipped_files.append((result['original_file'], result['error']))
 
-            # 使用增强版描述（包含Wyckoff位置信息）
-            description = generate_crystal_description_enhanced(cif_file, atoms)
-
-            # 生成唯一ID
-            file_id = f"synth_pos_{cif_file.stem}"
-
-            # 复制CIF文件到输出目录
-            new_cif_path = cif_output_dir / f"{file_id}.cif"
-            shutil.copy(cif_file, new_cif_path)
-
-            all_data.append({
-                'id': file_id,
-                'composition': composition,
-                'label': 1,  # 可合成
-                'text': description,
-                'original_file': cif_file.name
-            })
-        except Exception as e:
-            error_msg = str(e)
-            if 'Cannot find atomic coordinate' in error_msg:
-                error_stats['no_coords'] += 1
-            else:
-                error_stats['other'] += 1
-
-            # Only log first 10 errors to avoid spam
-            if len(skipped_files) < 10:
-                skipped_files.append((cif_file.name, error_msg))
-            continue
+                pbar.update(1)
 
     # Print summary
     successful = sum(1 for d in all_data if d['label']==1)
@@ -498,48 +541,36 @@ def prepare_synthesizability_dataset(
     error_stats_neg = {'no_coords': 0, 'other': 0}
     skipped_files_neg = []
 
-    for cif_file in tqdm(negative_cifs, desc="  加载负样本",
-                         bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'):
-        try:
-            # Suppress stderr to hide "cif2cell: command not found" warnings
-            import io
-            import contextlib
+    # 使用多进程处理
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        # 提交所有任务
+        futures = {
+            executor.submit(process_single_cif, cif_file, 0, "synth_neg", cif_output_dir): cif_file
+            for cif_file in negative_cifs
+        }
 
-            # Capture stderr
-            stderr_buffer = io.StringIO()
-            with contextlib.redirect_stderr(stderr_buffer):
-                atoms = Atoms.from_cif(str(cif_file))
+        # 使用tqdm显示进度
+        with tqdm(total=len(negative_cifs), desc="  加载负样本",
+                  bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]') as pbar:
+            for future in as_completed(futures):
+                result = future.result()
 
-            composition = atoms.composition.reduced_formula
+                if result['success']:
+                    # 成功处理的样本
+                    all_data.append({
+                        'id': result['id'],
+                        'composition': result['composition'],
+                        'label': result['label'],
+                        'text': result['text'],
+                        'original_file': result['original_file']
+                    })
+                else:
+                    # 失败的样本
+                    error_stats_neg[result['error_type']] += 1
+                    if len(skipped_files_neg) < 10:
+                        skipped_files_neg.append((result['original_file'], result['error']))
 
-            # 使用增强版描述（包含Wyckoff位置信息）
-            description = generate_crystal_description_enhanced(cif_file, atoms)
-
-            # 生成唯一ID
-            file_id = f"synth_neg_{cif_file.stem}"
-
-            # 复制CIF文件到输出目录
-            new_cif_path = cif_output_dir / f"{file_id}.cif"
-            shutil.copy(cif_file, new_cif_path)
-
-            all_data.append({
-                'id': file_id,
-                'composition': composition,
-                'label': 0,  # 不可合成
-                'text': description,
-                'original_file': cif_file.name
-            })
-        except Exception as e:
-            error_msg = str(e)
-            if 'Cannot find atomic coordinate' in error_msg:
-                error_stats_neg['no_coords'] += 1
-            else:
-                error_stats_neg['other'] += 1
-
-            # Only log first 10 errors to avoid spam
-            if len(skipped_files_neg) < 10:
-                skipped_files_neg.append((cif_file.name, error_msg))
-            continue
+                pbar.update(1)
 
     # Print summary
     successful_neg = sum(1 for d in all_data if d['label']==0)
@@ -669,6 +700,8 @@ if __name__ == "__main__":
                         help='测试集比例')
     parser.add_argument('--random_seed', type=int, default=42,
                         help='随机种子')
+    parser.add_argument('--workers', type=int, default=16,
+                        help='并行处理的进程数（默认16）')
 
     args = parser.parse_args()
 
@@ -689,5 +722,6 @@ if __name__ == "__main__":
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         test_ratio=args.test_ratio,
-        random_seed=args.random_seed
+        random_seed=args.random_seed,
+        workers=args.workers
     )
