@@ -40,6 +40,7 @@ def extract_with_pmg(cif_path, symprec=1e-3, max_wy=12):
         s = Structure.from_file(str(cif_path))
         sga = SpacegroupAnalyzer(s, symprec=symprec)
         sgnum = int(sga.get_space_group_number())
+        crystal_system = sga.get_crystal_system()  # Get crystal system from pymatgen
 
         lat = s.lattice
         lattice = dict(
@@ -98,6 +99,7 @@ def extract_with_pmg(cif_path, symprec=1e-3, max_wy=12):
 
         return {
             "spacegroup_number": sgnum,
+            "crystal_system": crystal_system,
             "lattice": lattice,
             "wyckoff_sites": wyckoff_sites
         }
@@ -123,14 +125,24 @@ def generate_crystal_description_enhanced(cif_path, atoms):
     # 从JARVIS获取基础信息
     composition = atoms.composition.reduced_formula
     spacegroup = atoms.spacegroup()
-    lattice_system = atoms.lattice.lattice_system
     num_atoms = atoms.num_atoms
+
+    # 尝试从JARVIS获取晶系，如果失败则使用pymatgen的
+    try:
+        lattice_system = atoms.lattice.lattice_system
+    except AttributeError:
+        lattice_system = None
 
     if pmg_data is not None:
         # 使用pymatgen提取的详细信息
         sgnum = pmg_data["spacegroup_number"]
+        crystal_system = pmg_data["crystal_system"]
         lattice = pmg_data["lattice"]
         wyckoff_sites = pmg_data["wyckoff_sites"]
+
+        # 如果JARVIS没有提供晶系，使用pymatgen的
+        if lattice_system is None:
+            lattice_system = crystal_system
 
         # 构建详细描述
         description = f"{composition} crystal with {lattice_system} lattice system and space group {spacegroup} (No. {sgnum}). "
@@ -165,10 +177,17 @@ def generate_crystal_description_enhanced(cif_path, atoms):
 
     else:
         # 回退到简单描述（如果pymatgen提取失败）
-        description = (
-            f"{composition} crystal structure with {lattice_system} lattice system, "
-            f"space group {spacegroup}, containing {num_atoms} atoms per unit cell"
-        )
+        if lattice_system is not None:
+            description = (
+                f"{composition} crystal structure with {lattice_system} lattice system, "
+                f"space group {spacegroup}, containing {num_atoms} atoms per unit cell"
+            )
+        else:
+            # 如果连晶系都获取不到，使用最简单的描述
+            description = (
+                f"{composition} crystal structure with space group {spacegroup}, "
+                f"containing {num_atoms} atoms per unit cell"
+            )
 
     return description
 
@@ -186,7 +205,12 @@ def generate_crystal_description(atoms):
     # 获取晶体信息
     composition = atoms.composition.reduced_formula
     spacegroup = atoms.spacegroup()
-    lattice_system = atoms.lattice.lattice_system
+
+    # 尝试获取晶系
+    try:
+        lattice_system = atoms.lattice.lattice_system
+    except AttributeError:
+        lattice_system = None
 
     # 获取元素列表
     elements = list(set(atoms.elements))
@@ -196,11 +220,18 @@ def generate_crystal_description(atoms):
     num_atoms = atoms.num_atoms
 
     # 构建描述
-    description = (
-        f"{composition} crystal structure with {lattice_system} lattice system, "
-        f"space group {spacegroup}, containing {num_atoms} atoms per unit cell, "
-        f"composed of {elements_str} elements"
-    )
+    if lattice_system is not None:
+        description = (
+            f"{composition} crystal structure with {lattice_system} lattice system, "
+            f"space group {spacegroup}, containing {num_atoms} atoms per unit cell, "
+            f"composed of {elements_str} elements"
+        )
+    else:
+        description = (
+            f"{composition} crystal structure with space group {spacegroup}, "
+            f"containing {num_atoms} atoms per unit cell, "
+            f"composed of {elements_str} elements"
+        )
 
     return description
 
