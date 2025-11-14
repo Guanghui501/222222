@@ -12,7 +12,7 @@ import dgl
 import numpy as np
 import pandas as pd
 from jarvis.core.atoms import Atoms
-from graphs import Graph, StructureDataset
+from graphs import Graph, StructureDataset, prepare_line_graph_batch
 from jarvis.db.figshare import data as jdata
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -124,8 +124,23 @@ def get_torch_dataset(dataset=[],id_tag="jid",target="",neighbor_strategy="",ato
     df = pd.DataFrame(dataset)
     vals = df[target].values
     print("data range", np.max(vals), np.min(vals))
-    graphs = load_graphs(df,name=name,neighbor_strategy=neighbor_strategy,use_canonize=use_canonize,cutoff=cutoff,max_neighbors=max_neighbors)
-    data = StructureDataset(df,graphs,target=target,atom_features=atom_features,line_graph=line_graph,id_tag=id_tag)
+
+    # Check if graphs are already prebuilt (from preprocessed data)
+    if len(dataset) > 0 and "graph" in dataset[0]:
+        print("使用预构建的图（来自预处理数据）")
+        graphs = [item["graph"] for item in dataset]
+        # Create StructureDataset with prebuilt graphs
+        data = StructureDataset(df,graphs,target=target,atom_features=atom_features,line_graph=False,id_tag=id_tag)
+        # If line graphs are prebuilt, use them directly
+        if line_graph and "line_graph" in dataset[0]:
+            print("使用预构建的 line graphs")
+            data.line_graph = True
+            data.line_graphs = [item["line_graph"] for item in dataset]
+            data.prepare_batch = prepare_line_graph_batch
+    else:
+        graphs = load_graphs(df,name=name,neighbor_strategy=neighbor_strategy,use_canonize=use_canonize,cutoff=cutoff,max_neighbors=max_neighbors)
+        data = StructureDataset(df,graphs,target=target,atom_features=atom_features,line_graph=line_graph,id_tag=id_tag)
+
     return data
 
 

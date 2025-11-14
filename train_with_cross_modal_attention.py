@@ -238,15 +238,19 @@ def load_preprocessed_dataset(preprocessed_dir, dataset, property_name):
         with open(pkl_file, 'rb') as f:
             samples = pickle.load(f)
 
-        # 转换为训练所需的格式
+        # 转换为训练所需的字典格式（与load_dataset保持一致）
         data = []
         for sample in samples:
-            data.append((
-                sample['graph'][0],      # atom graph
-                sample['line_graph'],    # line graph
-                sample['text'],          # normalized text
-                sample['target']         # target value
-            ))
+            # 从图中恢复 atoms 信息
+            # 注意：我们直接使用预构建的图，不需要 atoms.to_dict()
+            info = {
+                "graph": sample['graph'][0],      # atom graph (预构建)
+                "line_graph": sample['line_graph'],  # line graph (预构建)
+                "jid": sample['id'],
+                "text": sample['text'],          # 已规范化的文本
+                "target": sample['target']
+            }
+            data.append(info)
 
         splits[split_name] = data
         print(f"  ✓ 加载了 {len(data)} 个样本")
