@@ -12,10 +12,17 @@
 import os
 import csv
 import argparse
+import sys
+import os
+import warnings
 from pathlib import Path
 from jarvis.core.atoms import Atoms
 from tqdm import tqdm
 import random
+
+# Suppress JARVIS warnings and deprecation warnings
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', category=UserWarning)
 
 
 def extract_with_pmg(cif_path, symprec=1e-3, max_wy=12):
@@ -285,9 +292,23 @@ def prepare_synthesizability_dataset(
     positive_cifs = list(Path(positive_dir).glob('*.cif'))
     print(f"  找到 {len(positive_cifs)} 个CIF文件")
 
-    for cif_file in tqdm(positive_cifs, desc="  加载正样本"):
+    # 统计错误类型
+    error_stats = {'no_coords': 0, 'other': 0}
+    skipped_files = []
+
+    import shutil
+    for cif_file in tqdm(positive_cifs, desc="  加载正样本",
+                         bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'):
         try:
-            atoms = Atoms.from_cif(str(cif_file))
+            # Suppress stderr to hide "cif2cell: command not found" warnings
+            import io
+            import contextlib
+
+            # Capture stderr
+            stderr_buffer = io.StringIO()
+            with contextlib.redirect_stderr(stderr_buffer):
+                atoms = Atoms.from_cif(str(cif_file))
+
             composition = atoms.composition.reduced_formula
 
             # 使用增强版描述（包含Wyckoff位置信息）
@@ -298,7 +319,6 @@ def prepare_synthesizability_dataset(
 
             # 复制CIF文件到输出目录
             new_cif_path = cif_output_dir / f"{file_id}.cif"
-            import shutil
             shutil.copy(cif_file, new_cif_path)
 
             all_data.append({
@@ -309,10 +329,29 @@ def prepare_synthesizability_dataset(
                 'original_file': cif_file.name
             })
         except Exception as e:
-            print(f"    ⚠️  跳过文件 {cif_file.name}: {e}")
+            error_msg = str(e)
+            if 'Cannot find atomic coordinate' in error_msg:
+                error_stats['no_coords'] += 1
+            else:
+                error_stats['other'] += 1
+
+            # Only log first 10 errors to avoid spam
+            if len(skipped_files) < 10:
+                skipped_files.append((cif_file.name, error_msg))
             continue
 
-    print(f"  ✅ 成功加载 {sum(1 for d in all_data if d['label']==1)} 个正样本")
+    # Print summary
+    successful = sum(1 for d in all_data if d['label']==1)
+    total_errors = error_stats['no_coords'] + error_stats['other']
+    print(f"  ✅ 成功加载 {successful} 个正样本")
+    if total_errors > 0:
+        print(f"  ⚠️  跳过 {total_errors} 个文件:")
+        print(f"      - 缺少坐标信息: {error_stats['no_coords']}")
+        print(f"      - 其他错误: {error_stats['other']}")
+        if skipped_files:
+            print(f"  前{len(skipped_files)}个错误示例:")
+            for fname, err in skipped_files[:3]:
+                print(f"      {fname}: {err[:60]}...")
 
     # 处理不可合成晶体（负样本）
     print(f"\n处理不可合成晶体 (负样本, label=0):")
@@ -321,9 +360,22 @@ def prepare_synthesizability_dataset(
     negative_cifs = list(Path(negative_dir).glob('*.cif'))
     print(f"  找到 {len(negative_cifs)} 个CIF文件")
 
-    for cif_file in tqdm(negative_cifs, desc="  加载负样本"):
+    # 统计错误类型
+    error_stats_neg = {'no_coords': 0, 'other': 0}
+    skipped_files_neg = []
+
+    for cif_file in tqdm(negative_cifs, desc="  加载负样本",
+                         bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'):
         try:
-            atoms = Atoms.from_cif(str(cif_file))
+            # Suppress stderr to hide "cif2cell: command not found" warnings
+            import io
+            import contextlib
+
+            # Capture stderr
+            stderr_buffer = io.StringIO()
+            with contextlib.redirect_stderr(stderr_buffer):
+                atoms = Atoms.from_cif(str(cif_file))
+
             composition = atoms.composition.reduced_formula
 
             # 使用增强版描述（包含Wyckoff位置信息）
@@ -334,7 +386,6 @@ def prepare_synthesizability_dataset(
 
             # 复制CIF文件到输出目录
             new_cif_path = cif_output_dir / f"{file_id}.cif"
-            import shutil
             shutil.copy(cif_file, new_cif_path)
 
             all_data.append({
@@ -345,10 +396,29 @@ def prepare_synthesizability_dataset(
                 'original_file': cif_file.name
             })
         except Exception as e:
-            print(f"    ⚠️  跳过文件 {cif_file.name}: {e}")
+            error_msg = str(e)
+            if 'Cannot find atomic coordinate' in error_msg:
+                error_stats_neg['no_coords'] += 1
+            else:
+                error_stats_neg['other'] += 1
+
+            # Only log first 10 errors to avoid spam
+            if len(skipped_files_neg) < 10:
+                skipped_files_neg.append((cif_file.name, error_msg))
             continue
 
-    print(f"  ✅ 成功加载 {sum(1 for d in all_data if d['label']==0)} 个负样本")
+    # Print summary
+    successful_neg = sum(1 for d in all_data if d['label']==0)
+    total_errors_neg = error_stats_neg['no_coords'] + error_stats_neg['other']
+    print(f"  ✅ 成功加载 {successful_neg} 个负样本")
+    if total_errors_neg > 0:
+        print(f"  ⚠️  跳过 {total_errors_neg} 个文件:")
+        print(f"      - 缺少坐标信息: {error_stats_neg['no_coords']}")
+        print(f"      - 其他错误: {error_stats_neg['other']}")
+        if skipped_files_neg:
+            print(f"  前{len(skipped_files_neg)}个错误示例:")
+            for fname, err in skipped_files_neg[:3]:
+                print(f"      {fname}: {err[:60]}...")
 
     # 统计
     total_samples = len(all_data)
