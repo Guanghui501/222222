@@ -68,6 +68,12 @@ def get_parser():
     parser.add_argument('--property', type=str, default='formation_energy',
                         help='预测的性质 (e.g., formation_energy, band_gap)')
 
+    # 预处理数据参数
+    parser.add_argument('--use_preprocessed', type=bool, default=False,
+                        help='是否使用预处理的图数据（大幅加快加载速度）')
+    parser.add_argument('--preprocessed_dir', type=str, default='preprocessed_data',
+                        help='预处理数据目录')
+
     # 数据划分参数
     parser.add_argument('--train_ratio', type=float, default=0.8,
                         help='训练集比例')
@@ -195,6 +201,72 @@ def get_dataset_paths(root_dir, dataset, property_name):
 
 
 # ==================== 数据加载 ====================
+
+def load_preprocessed_dataset(preprocessed_dir, dataset, property_name):
+    """加载预处理的数据集
+
+    Args:
+        preprocessed_dir: 预处理数据目录
+        dataset: 数据集名称
+        property_name: 属性名称
+
+    Returns:
+        train_data, val_data, test_data: 三个列表，每个元素是 (graph, line_graph, text, target)
+    """
+    import pickle
+
+    # 数据集名称映射
+    dataset_name_mapping = {
+        'jarvis': 'jarvis',
+        'dft_3d': 'jarvis',
+        'matbench': 'megnet',
+        'megnet': 'megnet',
+    }
+    actual_dataset = dataset_name_mapping.get(dataset.lower(), dataset.lower())
+
+    print(f"\n{'='*60}")
+    print(f"加载预处理数据集: {dataset} - {property_name}")
+    print(f"预处理目录: {preprocessed_dir}")
+    print(f"{'='*60}\n")
+
+    # 加载三个数据集
+    splits = {}
+    for split_name in ['train', 'val', 'test']:
+        pkl_file = os.path.join(
+            preprocessed_dir,
+            f"{actual_dataset}_{property_name}_{split_name}.pkl"
+        )
+
+        if not os.path.exists(pkl_file):
+            raise FileNotFoundError(
+                f"找不到预处理文件: {pkl_file}\n"
+                f"请先运行: python preprocess_graphs.py --dataset {dataset} --property {property_name}"
+            )
+
+        print(f"加载 {split_name} 集: {pkl_file}")
+        with open(pkl_file, 'rb') as f:
+            samples = pickle.load(f)
+
+        # 转换为训练所需的格式
+        data = []
+        for sample in samples:
+            data.append((
+                sample['graph'][0],      # atom graph
+                sample['line_graph'],    # line graph
+                sample['text'],          # normalized text
+                sample['target']         # target value
+            ))
+
+        splits[split_name] = data
+        print(f"  ✓ 加载了 {len(data)} 个样本")
+
+    print(f"\n成功加载预处理数据!")
+    print(f"  训练集: {len(splits['train'])} 样本")
+    print(f"  验证集: {len(splits['val'])} 样本")
+    print(f"  测试集: {len(splits['test'])} 样本\n")
+
+    return splits['train'], splits['val'], splits['test']
+
 
 def load_dataset(cif_dir, id_prop_file, dataset, property_name):
     """加载数据集"""
@@ -471,25 +543,43 @@ def main():
     output_dir = os.path.join(args.output_dir, f"{args.property}/")
     os.makedirs(output_dir, exist_ok=True)
 
-    # 获取数据路径
-    cif_dir, id_prop_file = get_dataset_paths(args.root_dir, args.dataset, args.property)
-
-    # 检查路径是否存在
-    if not os.path.exists(cif_dir):
-        print(f"\n❌ 错误: CIF目录不存在: {cif_dir}")
-        print(f"\n提示:")
-        print(f"  1. 检查 --root_dir 参数是否正确")
-        print(f"  2. 当前工作目录: {os.getcwd()}")
-        print(f"  3. 如果在 src 目录下运行，使用: --root_dir ../dataset/")
-        print(f"  4. 如果在项目根目录运行，使用: --root_dir ./crysmmnet-main/dataset/")
-        raise FileNotFoundError(f"CIF目录不存在: {cif_dir}")
-    if not os.path.exists(id_prop_file):
-        print(f"\n❌ 错误: 描述文件不存在: {id_prop_file}")
-        print(f"\n提示: 请确保数据集已正确下载并解压")
-        raise FileNotFoundError(f"描述文件不存在: {id_prop_file}")
-
     # 加载数据集
-    dataset_array = load_dataset(cif_dir, id_prop_file, args.dataset, args.property)
+    if args.use_preprocessed:
+        # 使用预处理数据（快速加载）
+        print(f"\n⚡ 使用预处理数据加载模式")
+        print(f"预处理目录: {args.preprocessed_dir}\n")
+
+        train_data, val_data, test_data = load_preprocessed_dataset(
+            args.preprocessed_dir,
+            args.dataset,
+            args.property
+        )
+        dataset_array = (train_data, val_data, test_data)
+
+    else:
+        # 从原始 CIF 文件加载（慢速）
+        print(f"\n🐢 从原始 CIF 文件加载模式（较慢）")
+        print(f"提示: 使用 --use_preprocessed True 可以大幅加快加载速度\n")
+
+        # 获取数据路径
+        cif_dir, id_prop_file = get_dataset_paths(args.root_dir, args.dataset, args.property)
+
+        # 检查路径是否存在
+        if not os.path.exists(cif_dir):
+            print(f"\n❌ 错误: CIF目录不存在: {cif_dir}")
+            print(f"\n提示:")
+            print(f"  1. 检查 --root_dir 参数是否正确")
+            print(f"  2. 当前工作目录: {os.getcwd()}")
+            print(f"  3. 如果在 src 目录下运行，使用: --root_dir ../dataset/")
+            print(f"  4. 如果在项目根目录运行，使用: --root_dir ./crysmmnet-main/dataset/")
+            raise FileNotFoundError(f"CIF目录不存在: {cif_dir}")
+        if not os.path.exists(id_prop_file):
+            print(f"\n❌ 错误: 描述文件不存在: {id_prop_file}")
+            print(f"\n提示: 请确保数据集已正确下载并解压")
+            raise FileNotFoundError(f"描述文件不存在: {id_prop_file}")
+
+        # 加载数据集
+        dataset_array = load_dataset(cif_dir, id_prop_file, args.dataset, args.property)
 
     # 创建配置
     config_dict = create_config(args)
