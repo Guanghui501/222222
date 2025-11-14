@@ -221,15 +221,35 @@ def train_dgl(config: Union[TrainingConfig, Dict[str, Any]],model: nn.Module = N
         scheduler.load_state_dict(checkpoint["lr_scheduler"])
 
     # select configured loss function
-    criteria = {"mse": nn.MSELoss(),}
-    criterion = criteria[config.criterion]
+    # Check if classification task
+    classification = config.model.classification if hasattr(config.model, 'classification') else False
+
+    if classification:
+        criteria = {
+            "mse": nn.MSELoss(),
+            "crossentropy": nn.CrossEntropyLoss(),
+            "bce": nn.BCEWithLogitsLoss(),
+        }
+        # Use CrossEntropy for classification
+        if config.criterion == "mse":
+            criterion = nn.CrossEntropyLoss()
+            print(f"\n🎯 检测到分类任务，自动使用 CrossEntropyLoss")
+        else:
+            criterion = criteria.get(config.criterion, nn.CrossEntropyLoss())
+    else:
+        criteria = {"mse": nn.MSELoss(),}
+        criterion = criteria[config.criterion]
 
     # Check if contrastive learning is enabled
     use_contrastive = getattr(config.model, 'use_contrastive_loss', False)
     contrastive_weight = getattr(config.model, 'contrastive_loss_weight', 0.1)
 
     # set up default metrics
-    metrics = {"loss": Loss(criterion), "mae": MeanAbsoluteError()}
+    if classification:
+        metrics = {"loss": Loss(criterion), "accuracy": Accuracy()}
+        print(f"🎯 分类任务指标: Loss, Accuracy")
+    else:
+        metrics = {"loss": Loss(criterion), "mae": MeanAbsoluteError()}
 
     if use_contrastive:
         print(f"\n🔥 对比学习已启用:")
@@ -241,6 +261,10 @@ def train_dgl(config: Union[TrainingConfig, Dict[str, Any]],model: nn.Module = N
             net.train()
             optimizer.zero_grad()
             x, y = prepare_batch(batch)
+
+            # Classification: convert labels to long
+            if classification:
+                y = y.long().squeeze()
 
             # Forward pass
             output = net(x)
@@ -267,31 +291,70 @@ def train_dgl(config: Union[TrainingConfig, Dict[str, Any]],model: nn.Module = N
 
         trainer = ignite.engine.Engine(custom_train_step)
     else:
-        trainer = create_supervised_trainer(net,optimizer,criterion,prepare_batch=prepare_batch,device=device,deterministic=deterministic)
+        # Standard trainer (non-contrastive)
+        if classification:
+            # Custom trainer for classification
+            def classification_train_step(engine, batch):
+                net.train()
+                optimizer.zero_grad()
+                x, y = prepare_batch(batch)
+                y = y.long().squeeze()
+
+                output = net(x)
+                loss = criterion(output, y)
+                loss.backward()
+                optimizer.step()
+
+                return output, y
+
+            trainer = ignite.engine.Engine(classification_train_step)
+        else:
+            trainer = create_supervised_trainer(net,optimizer,criterion,prepare_batch=prepare_batch,device=device,deterministic=deterministic)
 
     if resume ==1:
         trainer.load_state_dict(checkpoint["trainer"])
 
-    # Custom output transform for contrastive learning
-    if use_contrastive:
+    # Custom output transform for contrastive learning or classification
+    if use_contrastive or classification:
         def output_transform(output):
             """Extract predictions from dict output"""
             y_pred, y = output
             if isinstance(y_pred, dict):
-                return y_pred['predictions'], y
+                y_pred = y_pred['predictions']
+
+            # For classification, convert y to long
+            if classification:
+                y = y.long().squeeze()
+
             return y_pred, y
 
         # Create custom metrics with output transform
-        metrics = {
-            "loss": Loss(criterion, output_transform=output_transform),
-            "mae": MeanAbsoluteError(output_transform=output_transform)
-        }
+        if classification:
+            metrics = {
+                "loss": Loss(criterion, output_transform=output_transform),
+                "accuracy": Accuracy(output_transform=output_transform)
+            }
+        else:
+            metrics = {
+                "loss": Loss(criterion, output_transform=output_transform),
+                "mae": MeanAbsoluteError(output_transform=output_transform)
+            }
 
-    evaluator = create_supervised_evaluator(net,metrics=metrics,prepare_batch=prepare_batch,device=device)
+    # Create evaluators with custom prepare_batch for classification
+    if classification:
+        def prepare_batch_classification(batch, device, non_blocking):
+            """Prepare batch for classification task"""
+            x, y = prepare_batch(batch, device, non_blocking)
+            y = y.long().squeeze()
+            return x, y
 
-    train_evaluator = create_supervised_evaluator(net,metrics=metrics,prepare_batch=prepare_batch,device=device)
-
-    test_evaluator = create_supervised_evaluator(net,metrics=metrics,prepare_batch=prepare_batch,device=device)
+        evaluator = create_supervised_evaluator(net,metrics=metrics,prepare_batch=prepare_batch_classification,device=device)
+        train_evaluator = create_supervised_evaluator(net,metrics=metrics,prepare_batch=prepare_batch_classification,device=device)
+        test_evaluator = create_supervised_evaluator(net,metrics=metrics,prepare_batch=prepare_batch_classification,device=device)
+    else:
+        evaluator = create_supervised_evaluator(net,metrics=metrics,prepare_batch=prepare_batch,device=device)
+        train_evaluator = create_supervised_evaluator(net,metrics=metrics,prepare_batch=prepare_batch,device=device)
+        test_evaluator = create_supervised_evaluator(net,metrics=metrics,prepare_batch=prepare_batch,device=device)
 
     # ignite event handlers:
     trainer.add_event_handler(Events.EPOCH_COMPLETED, TerminateOnNan())
@@ -366,14 +429,29 @@ def train_dgl(config: Union[TrainingConfig, Dict[str, Any]],model: nn.Module = N
         if config.progress:
             pbar = ProgressBar()
             pbar.log_message(f"Epoch: {engine.state.epoch:.1f}")
-            pbar.log_message(f"Train_MAE: {tmetrics['mae']:.4f}")
-            pbar.log_message(f"Val_MAE: {vmetrics['mae']:.4f}")
-            pbar.log_message(f"Test_MAE: {tstmetrics['mae']:.4f}")
+            if classification:
+                pbar.log_message(f"Train_Acc: {tmetrics['accuracy']:.4f}")
+                pbar.log_message(f"Val_Acc: {vmetrics['accuracy']:.4f}")
+                pbar.log_message(f"Test_Acc: {tstmetrics['accuracy']:.4f}")
+            else:
+                pbar.log_message(f"Train_MAE: {tmetrics['mae']:.4f}")
+                pbar.log_message(f"Val_MAE: {vmetrics['mae']:.4f}")
+                pbar.log_message(f"Test_MAE: {tstmetrics['mae']:.4f}")
 
         nonlocal best_loss
-        if tstmetrics['mae'] < best_loss:
-            best_loss = tstmetrics['mae']
-        print("Best_mae",best_loss)
+        if classification:
+            # For classification, maximize accuracy (so minimize -accuracy)
+            current_metric = -tstmetrics['accuracy']
+        else:
+            current_metric = tstmetrics['mae']
+
+        if current_metric < best_loss:
+            best_loss = current_metric
+
+        if classification:
+            print("Best_accuracy", -best_loss)
+        else:
+            print("Best_mae", best_loss)
         print("\n")
 
     # train the model!
@@ -382,9 +460,19 @@ def train_dgl(config: Union[TrainingConfig, Dict[str, Any]],model: nn.Module = N
     # Write Predictions
     net.eval()
     f = open(os.path.join(config.output_dir, "prediction_results_test_set.csv"),"w")
-    f.write("id,target,prediction\n")
-    targets = []
-    predictions = []
+
+    if classification:
+        # Classification output format
+        f.write("id,target,predicted_class,prob_class_0,prob_class_1\n")
+        targets = []
+        predictions = []
+        all_probs = []
+    else:
+        # Regression output format
+        f.write("id,target,prediction\n")
+        targets = []
+        predictions = []
+
     with torch.no_grad():
         ids = test_loader.dataset.ids  # [test_loader.dataset.indices]
         sample_idx = 0  # 追踪当前样本索引
@@ -396,35 +484,80 @@ def train_dgl(config: Union[TrainingConfig, Dict[str, Any]],model: nn.Module = N
             # 处理对比学习模式的dict输出
             if isinstance(out_data, dict):
                 out_data = out_data['predictions']
-            out_data = out_data.cpu().numpy().tolist()
-            if config.standard_scalar_and_pca:
-                sc = pk.load(open(os.path.join(tmp_output_dir, "sc.pkl"), "rb"))
-                out_data = sc.transform(np.array(out_data).reshape(-1, 1))[
-                    0
-                ][0]
-            target = target.cpu().numpy().flatten().tolist()
 
-            # 处理batch中的每个样本
-            batch_size = len(target) if isinstance(target, list) else 1
-            if batch_size == 1 and not isinstance(target, list):
-                target = [target]
-                out_data = [out_data]
+            if classification:
+                # Convert logits to probabilities
+                import torch.nn.functional as F
+                probs = F.softmax(out_data, dim=1)  # [batch_size, 2]
+                pred_classes = out_data.argmax(dim=1)  # [batch_size]
+
+                probs = probs.cpu().numpy()
+                pred_classes = pred_classes.cpu().numpy()
+                target = target.cpu().numpy().flatten().astype(int)
+                batch_size = len(target)
+            else:
+                # Regression
+                out_data = out_data.cpu().numpy().tolist()
+                if config.standard_scalar_and_pca:
+                    sc = pk.load(open(os.path.join(tmp_output_dir, "sc.pkl"), "rb"))
+                    out_data = sc.transform(np.array(out_data).reshape(-1, 1))[
+                        0
+                    ][0]
+                target = target.cpu().numpy().flatten().tolist()
+
+                # 处理batch中的每个样本
+                batch_size = len(target) if isinstance(target, list) else 1
+                if batch_size == 1 and not isinstance(target, list):
+                    target = [target]
+                    out_data = [out_data]
 
             for k in range(batch_size):
                 # 获取当前样本的id
                 id = ids[sample_idx + k]
-                # 将负数预测值统一为0
-                pred_value = max(0.0, out_data[k])
-                f.write("%s, %6f, %6f\n" % (id, target[k], pred_value))
-                targets.append(target[k])
-                predictions.append(pred_value)
+
+                if classification:
+                    # Classification: write class and probabilities
+                    target_class = int(target[k])
+                    pred_class = int(pred_classes[k])
+                    prob_0 = probs[k][0]
+                    prob_1 = probs[k][1]
+
+                    f.write(f"{id},{target_class},{pred_class},{prob_0:.6f},{prob_1:.6f}\n")
+                    targets.append(target_class)
+                    predictions.append(pred_class)
+                    all_probs.append(prob_1)  # Probability of positive class
+                else:
+                    # Regression: write continuous value
+                    pred_value = max(0.0, out_data[k])
+                    f.write("%s, %6f, %6f\n" % (id, target[k], pred_value))
+                    targets.append(target[k])
+                    predictions.append(pred_value)
 
             sample_idx += batch_size
     f.close()
-    from sklearn.metrics import mean_absolute_error
-    # print(targets)
-    # print(predictions)
-    print("Test MAE:",mean_absolute_error(np.array(targets), np.array(predictions)))
+
+    # Print final metrics
+    if classification:
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+        accuracy = accuracy_score(targets, predictions)
+        precision = precision_score(targets, predictions, zero_division=0)
+        recall = recall_score(targets, predictions, zero_division=0)
+        f1 = f1_score(targets, predictions, zero_division=0)
+        auc = roc_auc_score(targets, all_probs) if len(set(targets)) > 1 else 0.0
+
+        print("\n" + "="*60)
+        print("Classification Metrics on Test Set:")
+        print("="*60)
+        print(f"Accuracy:  {accuracy:.4f}")
+        print(f"Precision: {precision:.4f}")
+        print(f"Recall:    {recall:.4f}")
+        print(f"F1 Score:  {f1:.4f}")
+        print(f"AUC:       {auc:.4f}")
+        print("="*60 + "\n")
+    else:
+        from sklearn.metrics import mean_absolute_error
+        mae = mean_absolute_error(np.array(targets), np.array(predictions))
+        print("Test MAE:", mae)
 
 
     return history
