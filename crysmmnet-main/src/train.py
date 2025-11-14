@@ -224,13 +224,68 @@ def train_dgl(config: Union[TrainingConfig, Dict[str, Any]],model: nn.Module = N
     criteria = {"mse": nn.MSELoss(),}
     criterion = criteria[config.criterion]
 
-    # set up training engine and evaluators
+    # Check if contrastive learning is enabled
+    use_contrastive = getattr(config.model, 'use_contrastive_loss', False)
+    contrastive_weight = getattr(config.model, 'contrastive_loss_weight', 0.1)
+
+    # set up default metrics
     metrics = {"loss": Loss(criterion), "mae": MeanAbsoluteError()}
 
-    trainer = create_supervised_trainer(net,optimizer,criterion,prepare_batch=prepare_batch,device=device,deterministic=deterministic)
+    if use_contrastive:
+        print(f"\n🔥 对比学习已启用:")
+        print(f"  - 损失权重: {contrastive_weight}")
+        print(f"  - 温度参数: {getattr(config.model, 'contrastive_temperature', 0.1)}")
+
+        # Custom training function for contrastive learning
+        def custom_train_step(engine, batch):
+            net.train()
+            optimizer.zero_grad()
+            x, y = prepare_batch(batch)
+
+            # Forward pass
+            output = net(x)
+
+            # Handle dict output from contrastive learning
+            if isinstance(output, dict):
+                y_pred = output['predictions']
+                task_loss = criterion(y_pred, y)
+
+                # Add contrastive loss if available
+                if 'contrastive_loss' in output:
+                    contrastive_loss = output['contrastive_loss']
+                    total_loss = task_loss + contrastive_weight * contrastive_loss
+                else:
+                    total_loss = task_loss
+            else:
+                y_pred = output
+                total_loss = criterion(y_pred, y)
+
+            total_loss.backward()
+            optimizer.step()
+
+            return total_loss.item()
+
+        trainer = ignite.engine.Engine(custom_train_step)
+    else:
+        trainer = create_supervised_trainer(net,optimizer,criterion,prepare_batch=prepare_batch,device=device,deterministic=deterministic)
 
     if resume ==1:
         trainer.load_state_dict(checkpoint["trainer"])
+
+    # Custom output transform for contrastive learning
+    if use_contrastive:
+        def output_transform(output):
+            """Extract predictions from dict output"""
+            y_pred, y = output
+            if isinstance(y_pred, dict):
+                return y_pred['predictions'], y
+            return y_pred, y
+
+        # Create custom metrics with output transform
+        metrics = {
+            "loss": Loss(criterion, output_transform=output_transform),
+            "mae": MeanAbsoluteError(output_transform=output_transform)
+        }
 
     evaluator = create_supervised_evaluator(net,metrics=metrics,prepare_batch=prepare_batch,device=device)
 
