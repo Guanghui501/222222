@@ -392,6 +392,9 @@ def train_dgl(config: Union[TrainingConfig, Dict[str, Any]],model: nn.Module = N
             # out_data = net([g.to(device), lg.to(device)])
             g, lg, text, target = dat
             out_data = net([g.to(device), lg.to(device), text])
+            # 处理对比学习模式的dict输出
+            if isinstance(out_data, dict):
+                out_data = out_data['predictions']
             out_data = out_data.cpu().numpy().tolist()
             if config.standard_scalar_and_pca:
                 sc = pk.load(open(os.path.join(tmp_output_dir, "sc.pkl"), "rb"))
@@ -402,9 +405,11 @@ def train_dgl(config: Union[TrainingConfig, Dict[str, Any]],model: nn.Module = N
             if len(target) == 1:
                 target = target[0]
             for k in range(len(target)):
-                f.write("%s, %6f, %6f\n" % (id, target[k], out_data[k]))
+                # 将负数预测值统一为0
+                pred_value = max(0.0, out_data[k])
+                f.write("%s, %6f, %6f\n" % (id, target[k], pred_value))
                 targets.append(target[k])
-                predictions.append(out_data[k])
+                predictions.append(pred_value)
     f.close()
     from sklearn.metrics import mean_absolute_error
     # print(targets)
