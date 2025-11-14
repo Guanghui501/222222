@@ -258,18 +258,23 @@ class CrossModalAttention(nn.Module):
         x = x.view(batch_size, -1, self.num_heads, self.head_dim)
         return x.permute(0, 2, 1, 3)  # (batch, heads, seq, head_dim)
 
-    def forward(self, graph_feat, text_feat):
+    def forward(self, graph_feat, text_feat, return_attention=False):
         """Forward pass of cross-modal attention.
 
         Args:
             graph_feat: Graph features [batch_size, graph_dim]
             text_feat: Text features [batch_size, text_dim]
+            return_attention: 是否返回注意力权重（用于可解释性）
 
         Returns:
             enhanced_graph: Graph features enhanced by text [batch_size, graph_dim]
             enhanced_text: Text features enhanced by graph [batch_size, text_dim]
+            attention_weights: (可选) 注意力权重字典
         """
         batch_size = graph_feat.size(0)
+
+        # 存储注意力权重（用于可解释性）
+        attention_weights = {} if return_attention else None
 
         # Add sequence dimension if needed
         if graph_feat.dim() == 2:
@@ -294,6 +299,8 @@ class CrossModalAttention(nn.Module):
 
         attn_g2t = torch.matmul(Q_g2t, K_g2t.transpose(-2, -1)) * self.scale
         attn_g2t = F.softmax(attn_g2t, dim=-1)
+        if return_attention:
+            attention_weights['graph_to_text'] = attn_g2t.detach()  # [batch, heads, 1, 1]
         attn_g2t = self.dropout(attn_g2t)
 
         context_g2t = torch.matmul(attn_g2t, V_g2t)
@@ -313,6 +320,8 @@ class CrossModalAttention(nn.Module):
 
         attn_t2g = torch.matmul(Q_t2g, K_t2g.transpose(-2, -1)) * self.scale
         attn_t2g = F.softmax(attn_t2g, dim=-1)
+        if return_attention:
+            attention_weights['text_to_graph'] = attn_t2g.detach()  # [batch, heads, 1, 1]
         attn_t2g = self.dropout(attn_t2g)
 
         context_t2g = torch.matmul(attn_t2g, V_t2g)
@@ -324,7 +333,10 @@ class CrossModalAttention(nn.Module):
         enhanced_graph = self.layer_norm_graph(graph_feat + context_g2t)
         enhanced_text = self.layer_norm_text(text_feat + context_t2g)
 
-        return enhanced_graph, enhanced_text
+        if return_attention:
+            return enhanced_graph, enhanced_text, attention_weights
+        else:
+            return enhanced_graph, enhanced_text
 
 
 class ALIGNNConfig(BaseSettings):
@@ -601,16 +613,18 @@ class ALIGNN(nn.Module):
         elif config.link == "logit":
             self.link = torch.sigmoid
 
-    def forward(self, g: Union[Tuple[dgl.DGLGraph, dgl.DGLGraph], dgl.DGLGraph], return_features=False):
+    def forward(self, g: Union[Tuple[dgl.DGLGraph, dgl.DGLGraph], dgl.DGLGraph],
+               return_features=False, return_attention=False):
         """ALIGNN : start with `atom_features`.
 
         Args:
             g: Graph(s) and text input
             return_features: If True, return dict with predictions and intermediate features
+            return_attention: If True, include attention weights in returned dict (for interpretability)
 
         Returns:
             If return_features=False: predictions [batch_size]
-            If return_features=True: dict with 'predictions', 'graph_features', 'text_features', 'contrastive_loss'
+            If return_features=True or return_attention=True: dict with predictions and features/attention
 
         x: atom features (g.ndata)
         y: bond features (g.edata and lg.ndata)
@@ -668,9 +682,16 @@ class ALIGNN(nn.Module):
         h = self.graph_projection(graph_emb)
 
         # Multi-Modal Representation Fusion
+        attention_weights = None
         if self.use_cross_modal_attention:
             # Cross-modal attention fusion
-            enhanced_graph, enhanced_text = self.cross_modal_attention(h, text_emb)
+            if return_attention:
+                enhanced_graph, enhanced_text, attention_weights = self.cross_modal_attention(
+                    h, text_emb, return_attention=True
+                )
+            else:
+                enhanced_graph, enhanced_text = self.cross_modal_attention(h, text_emb)
+
             # Concatenate enhanced features (preserve full information)
             h = torch.cat([enhanced_graph, enhanced_text], dim=1)  # [batch, 128]
             h = F.relu(self.fc1(h))
@@ -690,13 +711,17 @@ class ALIGNN(nn.Module):
 
         predictions = torch.squeeze(out)
 
-        # Return intermediate features if requested (for contrastive learning)
-        if return_features or self.use_contrastive_loss:
+        # Return intermediate features if requested (for contrastive learning or interpretability)
+        if return_features or self.use_contrastive_loss or return_attention:
             output_dict = {
                 'predictions': predictions,
                 'graph_features': h if not self.use_cross_modal_attention else enhanced_graph,
                 'text_features': text_emb if not self.use_cross_modal_attention else enhanced_text,
             }
+
+            # Add attention weights if requested (for interpretability)
+            if return_attention and attention_weights is not None:
+                output_dict['attention_weights'] = attention_weights
 
             # Compute contrastive loss if enabled
             if self.use_contrastive_loss and self.training:
@@ -705,6 +730,6 @@ class ALIGNN(nn.Module):
                 contrastive_loss = self.contrastive_loss_fn(graph_feat, text_feat)
                 output_dict['contrastive_loss'] = contrastive_loss
 
-            return output_dict if return_features or (self.use_contrastive_loss and self.training) else predictions
+            return output_dict if return_features or return_attention or (self.use_contrastive_loss and self.training) else predictions
 
         return predictions
