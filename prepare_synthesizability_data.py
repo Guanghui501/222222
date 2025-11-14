@@ -13,16 +13,43 @@ import os
 import csv
 import argparse
 import sys
-import os
 import warnings
 from pathlib import Path
 from jarvis.core.atoms import Atoms
 from tqdm import tqdm
 import random
+import numpy as np
 
 # Suppress JARVIS warnings and deprecation warnings
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 warnings.filterwarnings('ignore', category=UserWarning)
+
+
+def try_imports():
+    """
+    尝试导入可用的库，返回可用的工具
+
+    Returns:
+        tuple: (pymatgen_tools, spglib, ase_read)
+    """
+    pmg = spg = ase_read = None
+    try:
+        from pymatgen.core import Structure
+        from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+        pmg = (Structure, SpacegroupAnalyzer)
+    except Exception:
+        pmg = None
+    try:
+        import spglib as spg_mod
+        spg = spg_mod
+    except Exception:
+        spg = None
+    try:
+        from ase.io import read as ase_read_fn
+        ase_read = ase_read_fn
+    except Exception:
+        ase_read = None
+    return pmg, spg, ase_read
 
 
 def extract_with_pmg(cif_path, symprec=1e-3, max_wy=12):
@@ -35,19 +62,18 @@ def extract_with_pmg(cif_path, symprec=1e-3, max_wy=12):
         max_wy: 最大Wyckoff位置数量
 
     Returns:
-        dict: 包含空间群、晶格参数、Wyckoff位置的字典
+        dict: 包含空间群、晶格参数、Wyckoff位置的字典，失败返回None
     """
     try:
-        from pymatgen.core import Structure
-        from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
-    except ImportError:
-        return None
+        pmg_tools = try_imports()[0]
+        if pmg_tools is None:
+            return None
 
-    try:
+        Structure, SpacegroupAnalyzer = pmg_tools
         s = Structure.from_file(str(cif_path))
         sga = SpacegroupAnalyzer(s, symprec=symprec)
         sgnum = int(sga.get_space_group_number())
-        crystal_system = sga.get_crystal_system()  # Get crystal system from pymatgen
+        crystal_system = sga.get_crystal_system()
 
         lat = s.lattice
         lattice = dict(
@@ -110,14 +136,97 @@ def extract_with_pmg(cif_path, symprec=1e-3, max_wy=12):
             "lattice": lattice,
             "wyckoff_sites": wyckoff_sites
         }
-    except Exception as e:
-        # If pymatgen extraction fails, return None
+    except Exception:
+        return None
+
+
+def extract_with_ase_spglib(cif_path, symprec=1e-3, max_wy=12):
+    """
+    使用ASE+spglib提取晶体结构的详细信息（备用方案）
+
+    Args:
+        cif_path: CIF文件路径
+        symprec: 对称性精度
+        max_wy: 最大Wyckoff位置数量
+
+    Returns:
+        dict: 包含空间群、晶格参数、Wyckoff位置的字典，失败返回None
+    """
+    try:
+        _, spg, ase_read = try_imports()
+        if spg is None or ase_read is None:
+            return None
+
+        at = ase_read(str(cif_path))
+        lattice = dict(
+            a=float(at.cell.lengths()[0]),
+            b=float(at.cell.lengths()[1]),
+            c=float(at.cell.lengths()[2]),
+            alpha=float(at.cell.angles()[0]),
+            beta=float(at.cell.angles()[1]),
+            gamma=float(at.cell.angles()[2])
+        )
+
+        cell = (at.cell.array, at.get_scaled_positions(), [a.number for a in at])
+        dataset = spg.get_symmetry_dataset(cell, symprec=symprec)
+        sgnum = int(dataset["number"])
+
+        # Get crystal system from space group number
+        crystal_system = spg.get_spacegroup_type(sgnum)['crystal_system']
+
+        wy_letters = dataset.get("wyckoffs", [])
+        eq = dataset.get("equivalent_atoms", None)
+        fracs = at.get_scaled_positions()
+        syms = at.get_chemical_symbols()
+
+        wyckoff_sites = []
+        if eq is None:
+            for i in range(min(max_wy, len(syms))):
+                letter = wy_letters[i] if i < len(wy_letters) else "?"
+                f = fracs[i]
+                wyckoff_sites.append({
+                    "element": syms[i],
+                    "wyckoff": f"1{letter}",
+                    "wyckoff_letter": letter,
+                    "multiplicity": 1,
+                    "frac": [float(f[0]), float(f[1]), float(f[2])]
+                })
+        else:
+            eq = np.asarray(eq)
+            labels = np.unique(eq)
+            count = 0
+            for lab in labels:
+                idxs = np.where(eq == lab)[0]
+                if len(idxs) == 0:
+                    continue
+                i0 = int(idxs[0])
+                mult = int(len(idxs))
+                letter = wy_letters[i0] if i0 < len(wy_letters) else "?"
+                f = fracs[i0]
+                wyckoff_sites.append({
+                    "element": syms[i0],
+                    "wyckoff": f"{mult}{letter}",
+                    "wyckoff_letter": letter,
+                    "multiplicity": mult,
+                    "frac": [float(f[0]), float(f[1]), float(f[2])]
+                })
+                count += 1
+                if count >= max_wy:
+                    break
+
+        return {
+            "spacegroup_number": sgnum,
+            "crystal_system": crystal_system,
+            "lattice": lattice,
+            "wyckoff_sites": wyckoff_sites
+        }
+    except Exception:
         return None
 
 
 def generate_crystal_description_enhanced(cif_path, atoms):
     """
-    生成增强的晶体描述（使用pymatgen提取的详细信息）
+    生成增强的晶体描述（使用pymatgen或ase+spglib提取的详细信息）
 
     Args:
         cif_path: CIF文件路径
@@ -129,12 +238,16 @@ def generate_crystal_description_enhanced(cif_path, atoms):
     # 尝试使用pymatgen提取详细信息
     pmg_data = extract_with_pmg(cif_path)
 
+    # 如果pymatgen失败，尝试使用ase+spglib
+    if pmg_data is None:
+        pmg_data = extract_with_ase_spglib(cif_path)
+
     # 从JARVIS获取基础信息
     composition = atoms.composition.reduced_formula
     spacegroup = atoms.spacegroup()
     num_atoms = atoms.num_atoms
 
-    # 尝试从JARVIS获取晶系，如果失败则使用pymatgen的
+    # 尝试从JARVIS获取晶系，如果失败则使用pymatgen/ase的
     try:
         lattice_system = atoms.lattice.lattice_system
     except AttributeError:
@@ -268,6 +381,27 @@ def prepare_synthesizability_dataset(
     print("\n" + "="*80)
     print("晶体可合成性二分类数据准备")
     print("="*80)
+
+    # 检查可用的库
+    pmg, spg, ase_read = try_imports()
+    print("\n可用的提取工具:")
+    if pmg is not None:
+        print("  ✅ pymatgen (推荐)")
+    else:
+        print("  ❌ pymatgen (未安装)")
+
+    if spg is not None and ase_read is not None:
+        print("  ✅ ase + spglib (备用)")
+    else:
+        if spg is None:
+            print("  ❌ spglib (未安装)")
+        if ase_read is None:
+            print("  ❌ ase (未安装)")
+
+    if pmg is None and (spg is None or ase_read is None):
+        print("\n⚠️  警告: 需要安装 pymatgen 或者 (ase + spglib)")
+        print("   建议: pip install pymatgen spglib")
+        return
 
     # 设置随机种子
     random.seed(random_seed)
