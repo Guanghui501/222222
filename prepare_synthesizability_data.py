@@ -18,9 +18,164 @@ from tqdm import tqdm
 import random
 
 
+def extract_with_pmg(cif_path, symprec=1e-3, max_wy=12):
+    """
+    使用pymatgen提取晶体结构的详细信息
+
+    Args:
+        cif_path: CIF文件路径
+        symprec: 对称性精度
+        max_wy: 最大Wyckoff位置数量
+
+    Returns:
+        dict: 包含空间群、晶格参数、Wyckoff位置的字典
+    """
+    try:
+        from pymatgen.core import Structure
+        from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+    except ImportError:
+        return None
+
+    try:
+        s = Structure.from_file(str(cif_path))
+        sga = SpacegroupAnalyzer(s, symprec=symprec)
+        sgnum = int(sga.get_space_group_number())
+
+        lat = s.lattice
+        lattice = dict(
+            a=float(lat.a),
+            b=float(lat.b),
+            c=float(lat.c),
+            alpha=float(lat.alpha),
+            beta=float(lat.beta),
+            gamma=float(lat.gamma)
+        )
+
+        # Use SymmetrizedStructure groups to get multiplicity
+        symm = sga.get_symmetrized_structure()
+        dataset = sga.get_symmetry_dataset()
+        wy_letters = dataset.get("wyckoffs", [])
+
+        equiv_sites = getattr(symm, "equivalent_sites", [])
+        equiv_indices = getattr(symm, "equivalent_indices", None)
+
+        wyckoff_sites = []
+        if equiv_indices is not None:
+            for group_sites, group_indices in zip(equiv_sites, equiv_indices):
+                if len(wyckoff_sites) >= max_wy:
+                    break
+                rep = group_sites[0]
+                mult = int(len(group_indices))
+                idx0 = int(group_indices[0])
+                letter = wy_letters[idx0] if idx0 < len(wy_letters) else "?"
+                f = rep.frac_coords
+                wyckoff_sites.append({
+                    "element": rep.species_string,
+                    "wyckoff": f"{mult}{letter}",
+                    "wyckoff_letter": letter,
+                    "multiplicity": mult,
+                    "frac": [float(f[0]), float(f[1]), float(f[2])]
+                })
+        else:
+            # Fallback for older versions
+            for group in equiv_sites[:max_wy]:
+                rep = group[0]
+                f = rep.frac_coords
+                try:
+                    idx = min(range(len(s)),
+                            key=lambda i: ((s[i].frac_coords - f) ** 2).sum())
+                except Exception:
+                    idx = 0
+                mult = int(len(group))
+                letter = wy_letters[idx] if idx < len(wy_letters) else "?"
+                wyckoff_sites.append({
+                    "element": rep.species_string,
+                    "wyckoff": f"{mult}{letter}",
+                    "wyckoff_letter": letter,
+                    "multiplicity": mult,
+                    "frac": [float(f[0]), float(f[1]), float(f[2])]
+                })
+
+        return {
+            "spacegroup_number": sgnum,
+            "lattice": lattice,
+            "wyckoff_sites": wyckoff_sites
+        }
+    except Exception as e:
+        # If pymatgen extraction fails, return None
+        return None
+
+
+def generate_crystal_description_enhanced(cif_path, atoms):
+    """
+    生成增强的晶体描述（使用pymatgen提取的详细信息）
+
+    Args:
+        cif_path: CIF文件路径
+        atoms: JARVIS Atoms对象（作为备用）
+
+    Returns:
+        description: 文本描述字符串
+    """
+    # 尝试使用pymatgen提取详细信息
+    pmg_data = extract_with_pmg(cif_path)
+
+    # 从JARVIS获取基础信息
+    composition = atoms.composition.reduced_formula
+    spacegroup = atoms.spacegroup()
+    lattice_system = atoms.lattice.lattice_system
+    num_atoms = atoms.num_atoms
+
+    if pmg_data is not None:
+        # 使用pymatgen提取的详细信息
+        sgnum = pmg_data["spacegroup_number"]
+        lattice = pmg_data["lattice"]
+        wyckoff_sites = pmg_data["wyckoff_sites"]
+
+        # 构建详细描述
+        description = f"{composition} crystal with {lattice_system} lattice system and space group {spacegroup} (No. {sgnum}). "
+
+        # 添加晶格参数
+        a, b, c = lattice['a'], lattice['b'], lattice['c']
+        alpha, beta, gamma = lattice['alpha'], lattice['beta'], lattice['gamma']
+
+        if lattice_system == "cubic":
+            description += f"Cubic lattice parameter a={a:.3f} Å. "
+        elif lattice_system == "tetragonal":
+            description += f"Tetragonal lattice: a={a:.3f} Å, c={c:.3f} Å. "
+        elif lattice_system == "orthorhombic":
+            description += f"Orthorhombic lattice: a={a:.3f} Å, b={b:.3f} Å, c={c:.3f} Å. "
+        elif lattice_system == "hexagonal":
+            description += f"Hexagonal lattice: a={a:.3f} Å, c={c:.3f} Å. "
+        else:
+            description += f"Lattice parameters: a={a:.3f} Å, b={b:.3f} Å, c={c:.3f} Å, α={alpha:.1f}°, β={beta:.1f}°, γ={gamma:.1f}°. "
+
+        # 添加Wyckoff位置信息
+        if wyckoff_sites:
+            description += f"Contains {len(wyckoff_sites)} crystallographic sites: "
+            site_descriptions = []
+            for site in wyckoff_sites[:6]:  # 最多描述6个位置
+                element = site['element']
+                wyckoff = site['wyckoff']
+                site_descriptions.append(f"{element} at {wyckoff}")
+            description += ", ".join(site_descriptions)
+            if len(wyckoff_sites) > 6:
+                description += f", and {len(wyckoff_sites)-6} more sites"
+            description += "."
+
+    else:
+        # 回退到简单描述（如果pymatgen提取失败）
+        description = (
+            f"{composition} crystal structure with {lattice_system} lattice system, "
+            f"space group {spacegroup}, containing {num_atoms} atoms per unit cell"
+        )
+
+    return description
+
+
 def generate_crystal_description(atoms):
     """
-    为晶体生成文本描述
+    为晶体生成文本描述（简单版本，保持向后兼容）
 
     Args:
         atoms: JARVIS Atoms对象
@@ -103,7 +258,9 @@ def prepare_synthesizability_dataset(
         try:
             atoms = Atoms.from_cif(str(cif_file))
             composition = atoms.composition.reduced_formula
-            description = generate_crystal_description(atoms)
+
+            # 使用增强版描述（包含Wyckoff位置信息）
+            description = generate_crystal_description_enhanced(cif_file, atoms)
 
             # 生成唯一ID
             file_id = f"synth_pos_{cif_file.stem}"
@@ -137,7 +294,9 @@ def prepare_synthesizability_dataset(
         try:
             atoms = Atoms.from_cif(str(cif_file))
             composition = atoms.composition.reduced_formula
-            description = generate_crystal_description(atoms)
+
+            # 使用增强版描述（包含Wyckoff位置信息）
+            description = generate_crystal_description_enhanced(cif_file, atoms)
 
             # 生成唯一ID
             file_id = f"synth_neg_{cif_file.stem}"
