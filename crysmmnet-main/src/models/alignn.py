@@ -705,9 +705,10 @@ class ALIGNN(nn.Module):
         if self.link:
             out = self.link(out)
 
-        if self.classification:
-            # out = torch.round(torch.sigmoid(out))
-            out = self.softmax(out)
+        # For classification, don't apply softmax here
+        # CrossEntropyLoss expects raw logits and applies log_softmax internally
+        # if self.classification:
+        #     out = F.softmax(out, dim=1)  # Only use during inference, not training
 
         predictions = torch.squeeze(out)
 
