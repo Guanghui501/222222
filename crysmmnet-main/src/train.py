@@ -342,9 +342,10 @@ def train_dgl(config: Union[TrainingConfig, Dict[str, Any]],model: nn.Module = N
 
     # Create evaluators with custom prepare_batch for classification
     if classification:
-        def prepare_batch_classification(batch, device, non_blocking):
+        def prepare_batch_classification(batch, device=None, non_blocking=False):
             """Prepare batch for classification task"""
-            x, y = prepare_batch(batch, device, non_blocking)
+            # prepare_batch already has device bound via partial, so don't pass it again
+            x, y = prepare_batch(batch, non_blocking=non_blocking)
             y = y.long().squeeze()
             return x, y
 
