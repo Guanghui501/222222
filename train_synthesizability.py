@@ -180,6 +180,20 @@ def load_synthesizability_dataset(data_dir):
     print(f"    - 可合成 (label=1): {sum(1 for d in test_data if d['target']==1)}")
     print(f"    - 不可合成 (label=0): {sum(1 for d in test_data if d['target']==0)}")
 
+    # 验证数据集不为空
+    if len(train_data) == 0:
+        raise ValueError(f"❌ 训练集为空！请检查:\n"
+                        f"  1. {csv_file} 是否包含 split='train' 的数据\n"
+                        f"  2. CIF文件是否都能正确加载")
+    if len(val_data) == 0:
+        raise ValueError(f"❌ 验证集为空！请检查:\n"
+                        f"  1. {csv_file} 是否包含 split='val' 的数据\n"
+                        f"  2. 验证集的CIF文件是否都能正确加载")
+    if len(test_data) == 0:
+        raise ValueError(f"❌ 测试集为空！请检查:\n"
+                        f"  1. {csv_file} 是否包含 split='test' 的数据\n"
+                        f"  2. 测试集的CIF文件是否都能正确加载")
+
     return train_data, val_data, test_data
 
 
