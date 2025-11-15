@@ -62,9 +62,8 @@ def get_parser():
                         help='隐藏层维度')
 
     # 跨模态注意力参数
-    parser.add_argument('--use_cross_modal', type=lambda x: x.lower() == 'true',
-                        default=True,
-                        help='是否使用跨模态注意力')
+    parser.add_argument('--use_cross_modal', action='store_true', default=False,
+                        help='是否使用跨模态注意力（指定此标志则启用）')
     parser.add_argument('--cross_modal_hidden_dim', type=int, default=256,
                         help='跨模态注意力隐藏维度')
     parser.add_argument('--cross_modal_num_heads', type=int, default=8,
@@ -73,16 +72,14 @@ def get_parser():
                         help='跨模态注意力dropout')
 
     # 中期融合参数
-    parser.add_argument('--use_middle_fusion', type=lambda x: x.lower() == 'true',
-                        default=False,
-                        help='是否使用中期融合')
+    parser.add_argument('--use_middle_fusion', action='store_true', default=False,
+                        help='是否使用中期融合（指定此标志则启用）')
     parser.add_argument('--middle_fusion_layers', type=str, default='2',
                         help='中期融合层索引')
 
     # 对比学习参数
-    parser.add_argument('--use_contrastive', type=lambda x: x.lower() == 'true',
-                        default=True,
-                        help='是否使用对比学习')
+    parser.add_argument('--use_contrastive', action='store_true', default=False,
+                        help='是否使用对比学习（指定此标志则启用）')
     parser.add_argument('--contrastive_weight', type=float, default=0.1,
                         help='对比学习损失权重')
     parser.add_argument('--contrastive_temperature', type=float, default=0.1,
