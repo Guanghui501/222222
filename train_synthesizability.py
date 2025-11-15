@@ -245,7 +245,7 @@ def main():
         cross_modal_dropout=args.cross_modal_dropout,
         # 中期融合
         use_middle_fusion=args.use_middle_fusion,
-        middle_fusion_layers=[int(x) for x in args.middle_fusion_layers.split(',')],
+        middle_fusion_layers=args.middle_fusion_layers if args.use_middle_fusion else None,
         # 对比学习
         use_contrastive_loss=args.use_contrastive,
         contrastive_loss_weight=args.contrastive_weight,
