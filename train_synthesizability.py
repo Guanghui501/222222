@@ -224,7 +224,12 @@ def main():
 
     # 加载数据集
     train_data, val_data, test_data = load_synthesizability_dataset(args.data_dir)
-    dataset_array = (train_data, val_data, test_data)
+
+    # 合并数据集（保持train->val->test顺序）
+    dataset_array = train_data + val_data + test_data
+    n_train = len(train_data)
+    n_val = len(val_data)
+    n_test = len(test_data)
 
     # 创建模型配置 - 二分类任务
     model_config = ALIGNNConfig(
@@ -277,7 +282,7 @@ def main():
         standard_scalar_and_pca=False,
         scheduler="onecycle",
         pin_memory=False,
-        keep_data_order=False,
+        keep_data_order=True,  # 保持预定义的train/val/test划分
     )
 
     # 保存配置
@@ -292,6 +297,10 @@ def main():
     train_loader, val_loader, test_loader, prepare_batch = get_train_val_loaders(
         dataset_array=dataset_array,
         target=config.target,
+        n_train=n_train,
+        n_val=n_val,
+        n_test=n_test,
+        keep_data_order=True,  # 保持我们预定义的train/val/test划分
         batch_size=config.batch_size,
         atom_features=config.atom_features,
         neighbor_strategy=config.neighbor_strategy,
